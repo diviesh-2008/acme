@@ -19,7 +19,7 @@ import com.acme.salary.common.PageResponse;
 import com.acme.salary.common.error.NotFoundException;
 import com.acme.salary.employee.dto.EmployeeResponse;
 import com.acme.salary.employee.dto.EmployeeSearchCriteria;
-import com.acme.salary.seed.EmployeeSeedLoader;
+import com.acme.salary.seed.SeedDataLoader;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,7 +51,7 @@ class EmployeeIT {
 	private EmployeeRepository employeeRepository;
 
 	@Autowired
-	private EmployeeSeedLoader seedLoader;
+	private SeedDataLoader seedLoader;
 
 	@Autowired
 	private JdbcTemplate jdbcTemplate;

@@ -111,13 +111,17 @@ com.acme.salary
 │                AppUserDetailsService, InitialHrManagerInitializer, dto/
 ├── employee/    EmployeeController, EmployeeService, EmployeeRepository, EmployeeSpecifications,
 │                Employee entity, EmploymentStatus, dto/ (EmployeeResponse, EmployeeSearchCriteria)
-├── salary/      (planned) SalaryController, SalaryService, SalaryRecordRepository, SalaryRecord entity, dto/
+├── salary/      SalaryController, SalaryService, SalaryRecordRepository, SalaryRecord entity,
+│                SalaryRecordNotFoundException, dto/ (SalaryRecordResponse, CreateSalaryRequest,
+│                CorrectSalaryRequest)
 ├── analytics/   (planned) AnalyticsController, AnalyticsService, AnalyticsRepository (native queries), dto/
-├── seed/        EmployeeSeedGenerator (deterministic), EmployeeSeedLoader (dev only)
+├── seed/        EmployeeSeedGenerator, SalarySeedGenerator (deterministic), SeedDataLoader (dev only)
 └── common/
-    ├── security/  SecurityConfig (filter chain, BCrypt, JWT encoder/decoder), JwtProperties,
-    │              SecurityProblemHandler (401/403 → GlobalExceptionHandler)
-    ├── error/     GlobalExceptionHandler, NotFoundException
+    ├── security/    SecurityConfig (filter chain, BCrypt, JWT encoder/decoder), JwtProperties,
+    │                SecurityProblemHandler (401/403 → GlobalExceptionHandler)
+    ├── error/       GlobalExceptionHandler, NotFoundException, ConflictException,
+    │                FieldValidationException
+    ├── validation/  @IsoCurrencyCode
     └── ClockConfig, PageResponse
 ```
 
@@ -137,31 +141,95 @@ within a feature:
 - Mapping is hand-written in small static methods. No MapStruct and no Lombok: at this
   size they add build complexity without saving much code.
 - **Errors** are handled by one `@RestControllerAdvice` that returns RFC 9457
-  `ProblemDetail` for validation (400), authentication (401), authorization (403),
-  not found (404), conflicts such as a duplicate effective date (409),
-  and unexpected errors (500, with no internal details).
+  `ProblemDetail`:
+  - `400` for validation, with an `errors` object per field. This covers Bean Validation,
+    business rules that need data (`FieldValidationException`), unparseable values and
+    unknown JSON fields.
+  - `401` for authentication and `403` for authorization.
+  - `404` for anything missing. `EmployeeNotFoundException` and
+    `SalaryRecordNotFoundException` are separate classes that share one base.
+  - `409` for conflicts: a duplicate effective date or a terminated employee
+    (`ConflictException`), or a write rejected by a database constraint.
+  - `500` for unexpected errors, with no internal details.
+- **Unknown JSON fields are rejected** (`fail-on-unknown-properties`). A client that
+  sends `id`, `createdAt`, or an `effectiveDate` with a correction gets `400` naming the
+  field, instead of having it silently ignored.
 - **Time** comes from an injected `java.time.Clock` (UTC). "Today" drives the current
   salary and date validation, so tests can pin it.
 
 ## Salary history model
 
-- Each salary change is one row in `salary_record`: `amount`, `currency` and
-  `effective_date`. A new change is always a **new row**, so records for earlier dates
-  are never overwritten and the full history is kept.
-- **Corrections update in place.** A mistake in an existing record is fixed by updating
-  its `amount` and `currency` (`PUT` on that record). The effective date is the record's
-  identity within an employee's history and cannot be changed. Salary records are never
-  deleted. No audit trail of previous values is kept in v1.
+- Each salary change is one row in `salary_record`: `amount`, `currency`,
+  `effective_date` and `created_at`. `created_at` is `DATETIME(6)` in UTC, set from the
+  application's `Clock` and never changed afterwards. A new change is always a
+  **new row**, so records for earlier dates are never overwritten and the full history
+  is kept.
+- **Corrections update in place.** A mistake in an existing record is fixed with `PUT`
+  on that record, which changes only `amount` and `currency`.
+  - The effective date identifies the record within an employee's history, so it cannot
+    change. The correction request has no `effectiveDate` field, and sending one is
+    rejected with `400`.
+  - `employee_id`, `effective_date` and `created_at` are mapped `updatable = false`, so
+    Hibernate cannot write them either.
+  - The URL's employee must own the record. Otherwise the answer is `404`, so one
+    employee's URL can never modify another employee's salary.
+  - Corrections are allowed for terminated employees, because they fix historical data.
+  - Salary records are never deleted (`DELETE` returns `405`), no superseding records are
+    created, and no audit trail of previous values is kept in v1.
 - **Current salary** is *derived, not stored*: the record with the latest
-  `effective_date` on or before today (UTC). Nothing needs updating when a date passes.
-  There is no scheduled job and no denormalized column that could go stale.
+  `effective_date` on or before today. "Today" is `LocalDate.now(clock)` from the
+  injected UTC `Clock`, so tests can fix it. Nothing needs updating when a date passes.
+  There is no scheduled job, no `effective_to` column and no denormalized current-salary
+  column that could go stale.
 - **Future-dated changes** are ordinary rows with an `effective_date` after today. They
-  show as "scheduled" in the history and become current automatically on that date.
+  appear in the history and become current automatically on that date.
 - **At most one record per employee per effective date**, enforced by a unique
-  constraint. A duplicate returns `409 Conflict`. This keeps "the salary on date X"
-  unambiguous.
-- The employee list needs the current salary only for the rows on the page (≤ 100),
-  so it is fetched with a second, indexed query rather than a join over all history.
+  constraint. This keeps "the salary on date X" unambiguous.
+- **Adding a record** (`POST`) is allowed for past, current and future dates, within
+  these rules from the requirements:
+  - The date must be on or after the employee's hire date.
+  - The date may be at most one year ahead.
+  - The employee must not be `TERMINATED`.
+  - The date must not duplicate an existing record's date.
+- The employee list will need the current salary only for the rows on the page (≤ 100),
+  so it will be fetched with a second, indexed query rather than a join over all history.
+
+## Salary API
+
+All endpoints require the `HR_MANAGER` role.
+
+| Endpoint | Success | Errors |
+|----------|---------|--------|
+| `GET /api/employees/{employeeId}/salary` | `200` the record in force today | `404` if the employee is missing or has no salary effective yet (the two messages differ) |
+| `GET /api/employees/{employeeId}/salary/history` | `200` array, newest `effectiveDate` first; `[]` if none | `404` if the employee is missing |
+| `POST /api/employees/{employeeId}/salary` `{amount, currency, effectiveDate}` | `201` the new record | `400` invalid field; `404` employee missing; `409` duplicate date or terminated employee |
+| `PUT /api/employees/{employeeId}/salary/{salaryId}` `{amount, currency}` | `200` the corrected record | `400` invalid field or `effectiveDate` sent; `404` record not found for this employee |
+
+Responses are `{ id, amount, currency, effectiveDate }`, and `amount` always has two
+decimal places. No endpoint returns a JPA entity.
+
+**Validation.**
+- `amount` is required, `> 0`, with at most 13 digits before the decimal point and 2 after.
+  It is stored as `BigDecimal` / `DECIMAL(15,2)`.
+- `currency` is required and must be an ISO 4217 code that the JDK knows
+  (`java.util.Currency`). It is accepted in any letter case and stored upper-case.
+- `effectiveDate` is required on `POST`. Clients cannot send `id` or `createdAt`.
+
+**Currency decision.** The requirements say "a valid ISO 4217 code" without naming a
+fixed set, so any code in the JDK's ISO 4217 table is accepted. That covers INR, USD, GBP,
+EUR, AUD, CAD, SGD and the rest. There is no currency table, no exchange-rate API and no
+conversion.
+
+**Transactions and concurrency.**
+- `create` and `correct` are `@Transactional` at the service level; reads are
+  `readOnly`.
+- `create` checks for a duplicate date first, to return a clear `409`. The unique
+  `(employee_id, effective_date)` constraint is still the final guard. If two requests
+  race past the check, the second `INSERT` fails, its transaction rolls back, and the
+  handler turns the `DataIntegrityViolationException` into `409`. In a test with 10
+  simultaneous POSTs for the same date, exactly one succeeded and nine got `409`.
+- Two simultaneous corrections to the same record are last-write-wins. There is no
+  version column, which is acceptable for a small HR team.
 
 ## Multi-currency analytics
 
@@ -255,12 +323,16 @@ and count all happen in MySQL. Measured plans are in [performance.md](performanc
   database. `./mvnw test` stays Docker-free for a quick feedback loop.
 - **Deterministic.**
   - The MySQL image version is pinned.
-  - A fixed `Clock` is injected, so "today" never depends on when tests run.
-  - The integration-test context loads the 10,000-employee seed once per run. That tests
-    the loader against MySQL and runs queries at realistic volume.
-  - Search and filter tests assert on their own fixture rows, whose values the seed never
-    generates (surname "Quillfeather", country `NZ`, department "Research Lab"). They
-    don't depend on which names the generator happened to pick.
+  - Unit tests inject a fixed `Clock` (e.g. 2026-09-19), so "today" never depends on
+    when they run. Integration tests keep the real clock, because issued JWTs must be
+    valid now. They use dates far from today (e.g. 2001 and 2999), or call the
+    repository with an explicit date.
+  - The integration-test context loads the seed (10,000 employees, 24,901 salary
+    records) once per run. That tests the loader against MySQL and runs queries at
+    realistic volume.
+  - Search, filter and salary tests assert on their own fixture rows, whose values the
+    seed never generates (surname "Quillfeather", country `NZ`, employee codes `SAL-*`).
+    They don't depend on what the generator happened to pick.
   - Integration tests use MockMvc in the test thread and are `@Transactional`, so each
     test's data is rolled back.
   - No test depends on execution order.
@@ -274,17 +346,31 @@ and count all happen in MySQL. Measured plans are in [performance.md](performanc
 
 ## Seed strategy
 
+**Development and demo data only.** With the `dev` profile, the application loads
+**10,000 employees and about 24,901 salary records** (exactly 24,901 with the current
+generator). Both are deterministic. Salary histories are seeded as well as employees so
+that compensation analytics can be demonstrated immediately. The original plan left
+salary seeding to a later step; including it now was a deliberate change. Nothing is
+seeded without `acme.seed.enabled=true`, so production never generates employees or
+salaries automatically.
+
 - **Separate from schema migrations.** Flyway migrations contain only schema and run in
-  every environment. Demo data is loaded by `EmployeeSeedLoader`, which exists only when
+  every environment. Demo data is loaded by `SeedDataLoader`, which exists only when
   `acme.seed.enabled=true`. The `dev` profile (`application-dev.yml`) sets that, and so
   does the integration-test context. It is off by default, so production never seeds.
-- **Idempotent.** The loader inserts only when the `employee` table is empty. Restarting
-  never duplicates data, and it never tops up a partially filled table.
+- **Order.** Employees are seeded first, then salary histories. One loader does both,
+  so the order is guaranteed.
+- **Idempotent, per table.**
+  - Employees are inserted only when the `employee` table is empty.
+  - Salaries are inserted only when `salary_record` is empty, and only for employees
+    whose codes came from the seed.
+  - Restarting never duplicates data or tops up a partially filled table. A database
+    seeded with employees in Step 3 gets its salary histories on the next start.
 - **Synchronous, before requests.** Like the initial HR account, the loader runs as a
   `SmartInitializingSingleton`, after migrations but before the web server accepts
   requests. No request can see a half-seeded table.
-- **All or nothing.** Rows are inserted in one transaction. A failure leaves the table
-  empty, and the next startup retries.
+- **All or nothing, per table.** Each table's rows go in one transaction. A failure
+  leaves that table empty, and the next startup retries.
 - **Deterministic.**
   - `EmployeeSeedGenerator` is a pure class using `java.util.Random` with a fixed seed.
     That algorithm is fixed by the Java SE specification, so every JVM produces the same
@@ -303,9 +389,21 @@ and count all happen in MySQL. Measured plans are in [performance.md](performanc
     SG 5%.
   - 9 departments, each with its own job titles; Engineering is 35%.
   - Status mix of 90% `ACTIVE`, 4% `ON_LEAVE` and 6% `TERMINATED`.
+- **Salary histories** (`SalarySeedGenerator`, its own fixed random seed) come to
+  24,901 records:
+  - Every employee starts with a salary on their hire date. 0–3 raises of 2–10% follow on
+    1 January of recent years, up to 2026.
+  - About 5% of non-terminated employees have a raise scheduled for 2027-01-01, so there
+    is future-dated data to show.
+  - Amounts are whole numbers in the local currency (INR, USD, GBP, EUR, AUD, CAD, SGD),
+    scaled per country and department. These are typical pay levels, not converted
+    amounts. About 3% of non-US employees are paid in USD, so a country can have two
+    currencies. An employee keeps one currency across their history.
+  - Every seeded row has `created_at = 2026-01-01T00:00Z`, as if imported from the
+    spreadsheets that day. The amounts are pinned by a unit test.
 - **Fast.** JDBC batch inserts of 1,000 rows, with `rewriteBatchedStatements` enabled on
-  the MySQL driver. It takes about 3 seconds instead of 10,000 JPA `save()` calls.
-- **Salary histories** will be seeded the same way with the salary history step.
+  the MySQL driver. It takes about 2–3 seconds per table instead of 35,000 JPA `save()`
+  calls.
 - **Why not a Flyway Java migration?** It would mix demo data into schema history and run
   in every environment, including production.
 
@@ -317,7 +415,7 @@ and count all happen in MySQL. Measured plans are in [performance.md](performanc
 | `ACME_DB_USERNAME` / `ACME_DB_PASSWORD` | *none* | Database credentials |
 | `ACME_JWT_SECRET` | *none; required* | HS256 signing key (≥ 32 bytes) |
 | `ACME_INITIAL_HR_EMAIL` / `ACME_INITIAL_HR_PASSWORD` | *none* | Creates the initial HR Manager account if absent (password 12 characters to 72 bytes) |
-| `SPRING_PROFILES_ACTIVE` | *none* | `dev` enables the 10,000-employee seed |
+| `SPRING_PROFILES_ACTIVE` | *none* | `dev` enables the demo seed (employees and salary histories) |
 
 Nothing that is secret in a shared environment is committed.
 
@@ -328,7 +426,7 @@ Each increment is independently reviewable and committable.
 1. **Project foundation**: Spring Boot project, configuration, test infrastructure, docs. *(done)*
 2. **Authentication**: `app_user` migration, BCrypt, initial-user bootstrap, login endpoint, JWT issuing and validation, 401/403 handling, and the global `ProblemDetail` error handler. *(done)*
 3. **Employee domain**: `employee` migration, deterministic 10k seed, read-only list API (search, filters, pagination) and employee detail. *(done)*
-4. **Salary history API**: `salary_record` migration and seeded histories; record a salary change, correct a record, list history, current salary.
+4. **Salary history API**: `salary_record` migration and seeded histories; record a salary change, correct a record, list history, current salary. *(done)*
 5. **Analytics API**: per-currency aggregates overall, by country and by department.
 6. **Angular foundation**: project setup, login page, auth interceptor and route guard.
 7. **Employee list UI**: Material table with server-side pagination, search and filters, plus the filter-options endpoint.
@@ -344,7 +442,13 @@ Each increment is independently reviewable and committable.
 | How are multiple currencies aggregated? | Separately per currency. There is no conversion. |
 | Can employees be created or edited? | No. Employees are read-only in v1. |
 | How is a mistaken salary entry corrected? | By updating that record's amount and currency. There is one record per employee per effective date, and no superseding records. |
-| Is there an audit log? | Not in v1. Only fields the application uses are stored. |
+| Is there an audit log? | Not in v1. `salary_record.created_at` records when a row was added; corrections don't keep previous values. |
+| Which currencies are accepted? | Any ISO 4217 code in the JDK's table (`java.util.Currency`), in any letter case, stored upper-case. |
+| What happens to unknown JSON fields? | `400` naming the field, application-wide. |
+| Does `salary_record` need an index besides its unique constraint? | No. The unique `(employee_id, effective_date)` index serves every query and the foreign key. |
+| Is salary history seeded? | Yes, in development/demo only: 10,000 employees and about 24,901 deterministic salary records, so analytics can be demonstrated immediately. Never in production. |
+| Does `POST …/salary` return a `Location` header? | No. The `201` body contains the new record, and a salary-by-id `GET` endpoint would exist only for REST form. |
+| How are simultaneous corrections handled? | Last write wins. There is no version column or audit log in v1. |
 | What if Docker is unavailable for integration tests? | They fail, never skip, so a green build means they ran. |
 | Can clients choose the sort order? | Not in v1. The order is fixed at last name, first name, id. |
 | What happens with `size=1000`? | `400`, not silently capped. The maximum is 100. |

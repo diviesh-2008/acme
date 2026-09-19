@@ -1,7 +1,6 @@
 package com.acme.salary.employee;
 
 import com.acme.salary.common.PageResponse;
-import com.acme.salary.common.error.NotFoundException;
 import com.acme.salary.employee.dto.EmployeeResponse;
 import com.acme.salary.employee.dto.EmployeeSearchCriteria;
 import org.springframework.data.domain.Page;
@@ -31,12 +30,12 @@ public class EmployeeService {
 	}
 
 	/**
-	 * @throws NotFoundException if no employee has this id
+	 * @throws EmployeeNotFoundException if no employee has this id
 	 */
 	public EmployeeResponse getById(long id) {
 		return employeeRepository.findById(id)
 			.map(EmployeeResponse::from)
-			.orElseThrow(() -> new NotFoundException("Employee " + id + " was not found."));
+			.orElseThrow(() -> new EmployeeNotFoundException(id));
 	}
 
 }

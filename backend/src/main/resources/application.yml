@@ -26,6 +26,12 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+  jackson:
+    deserialization:
+      # Reject unknown JSON fields (400) instead of silently ignoring them, e.g. an
+      # effectiveDate sent with a salary correction, or a client-supplied id.
+      fail-on-unknown-properties: true
+
 server:
   error:
     include-stacktrace: never

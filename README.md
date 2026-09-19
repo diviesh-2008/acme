@@ -44,7 +44,7 @@ export ACME_DB_PASSWORD="<the password from local-setup.sql>"
 export ACME_JWT_SECRET="$(openssl rand -base64 48)"
 export ACME_INITIAL_HR_EMAIL="hr@acme.com"
 export ACME_INITIAL_HR_PASSWORD="<at least 12 characters>"
-export SPRING_PROFILES_ACTIVE="dev"      # loads 10,000 demo employees on first start
+export SPRING_PROFILES_ACTIVE="dev"      # loads demo employees and salaries on first start
 ./mvnw spring-boot:run
 ```
 
@@ -59,9 +59,13 @@ Get-Content .env | Where-Object { $_ -match '^[A-Z_]+=' } | ForEach-Object { $na
 Flyway applies migrations automatically on startup. Once the account exists, it is
 never modified, and changing `ACME_INITIAL_HR_PASSWORD` later does not reset it.
 
-**Demo data.** With the `dev` profile, the first start loads 10,000 deterministic
-employees (about 3 seconds). Later starts see existing employees and skip it. Without
-`dev`, nothing is seeded.
+**Demo data (development only).** With the `dev` profile, the first start loads
+deterministic demo data in a few seconds: 10,000 employees and about 24,901 salary
+records. Salary histories are included so compensation analytics can be demonstrated
+immediately. Each table is filled only while empty, so later starts skip it. A database
+seeded with employees by an earlier version gets its salary histories on the next start.
+Without `dev`, nothing is seeded; production never generates employees or salaries
+automatically.
 
 ## API
 
@@ -71,6 +75,10 @@ employees (about 3 seconds). Later starts see existing employees and skip it. Wi
 | `GET` | `/api/auth/me` | Bearer token | The signed-in user's `email` and `role` |
 | `GET` | `/api/employees` | Bearer token | One page of employees; see below |
 | `GET` | `/api/employees/{id}` | Bearer token | One employee, or `404` |
+| `GET` | `/api/employees/{id}/salary` | Bearer token | The salary in force today, or `404` |
+| `GET` | `/api/employees/{id}/salary/history` | Bearer token | All salary records, newest first (`[]` if none) |
+| `POST` | `/api/employees/{id}/salary` | Bearer token | Add a salary record → `201` |
+| `PUT` | `/api/employees/{id}/salary/{salaryId}` | Bearer token | Correct a record's amount and currency |
 
 Employees are read-only. `/api/employees` takes these optional query parameters:
 
@@ -109,12 +117,44 @@ A page looks like:
 }
 ```
 
+### Salary
+
+The **current salary** is the record with the latest `effectiveDate` on or before today.
+Future-dated records appear in the history and become current on their date.
+
+```bash
+curl -s localhost:8080/api/employees/1/salary -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8080/api/employees/1/salary/history -H "Authorization: Bearer $TOKEN"
+
+# Add a salary change (past, current or future date; at most one year ahead)
+curl -s -X POST localhost:8080/api/employees/1/salary -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 58000.00, "currency": "EUR", "effectiveDate": "2026-10-01"}'
+
+# Correct an existing record: amount and currency only; the effective date cannot change
+curl -s -X PUT localhost:8080/api/employees/1/salary/<salaryId> -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 58500.00, "currency": "EUR"}'
+```
+
+A salary record looks like `{"id": 15, "amount": 900000.00, "currency": "INR", "effectiveDate": "2026-01-01"}`.
+
+Rules:
+- `amount` must be greater than 0 with at most 2 decimal places.
+- `currency` must be an ISO 4217 code (any letter case).
+- On `POST`, `effectiveDate` must be between the hire date and one year ahead.
+- There is at most one record per employee per date; a duplicate gets `409`.
+- Terminated employees can't get new records (`409`), but their records can be corrected.
+- Salary records are never deleted, and there is no currency conversion.
+
 Errors use RFC 9457 Problem Details (`application/problem+json`):
 
-- `400` for malformed or invalid input, with an `errors` object per field
+- `400` for malformed or invalid input, with an `errors` object per field. Unknown JSON
+  fields (e.g. `id`, or `effectiveDate` on a correction) are rejected.
 - `401` for bad credentials or a missing, invalid or expired token
 - `403` for a missing role
-- `404` for an unknown employee
+- `404` for an unknown employee or salary record, or no salary in force yet
+- `409` for a duplicate effective date or a terminated employee
 
 ## Running the tests
 
@@ -125,7 +165,7 @@ cd backend
 ```
 
 Integration tests start a throwaway `mysql:8.4` container automatically and load the
-10,000-employee seed into it. No local database or user setup is required.
+demo seed into it. No local database or user setup is required.
 
 ## Configuration
 
@@ -137,7 +177,7 @@ Integration tests start a throwaway `mysql:8.4` container automatically and load
 | `ACME_JWT_SECRET`          | *none; required*                          | JWT signing secret, at least 32 bytes                |
 | `ACME_INITIAL_HR_EMAIL`    | *none*                                    | Initial HR Manager email (created if absent)         |
 | `ACME_INITIAL_HR_PASSWORD` | *none*                                    | Initial HR Manager password, 12 characters to 72 bytes |
-| `SPRING_PROFILES_ACTIVE`   | *none*                                    | `dev` loads the 10,000 demo employees                |
+| `SPRING_PROFILES_ACTIVE`   | *none*                                    | `dev` loads the demo employees and salary histories |
 
 Only the database URL has a default, which points at a local MySQL. No credentials or
 secrets have defaults.

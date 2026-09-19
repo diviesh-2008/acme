@@ -98,6 +98,27 @@ Counted from Hibernate's SQL log against the seeded database:
 The count doesn't depend on page size, so there is no N+1. The application only ever
 receives one page of rows (at most 100).
 
+## Salary queries
+
+Every salary query is scoped to one employee and uses the unique
+`(employee_id, effective_date)` index. Measured on MySQL 8.0.46 with the seed of
+10,000 employees and 24,901 salary records:
+
+| Request | SQL statements (from Hibernate's log) | Plan of the salary query | Time |
+|---------|---------------------------------------|--------------------------|-----:|
+| `GET …/salary` (current) | 2: employee exists (`count` by primary key), then `… WHERE employee_id = ? AND effective_date <= ? ORDER BY effective_date DESC LIMIT 1` | Reverse index range scan, stops after 1 row | 0.03 ms |
+| `GET …/salary/history` | 2: employee exists, then `… WHERE employee_id = ? ORDER BY effective_date DESC` | Reverse index lookup, no sort | 0.04 ms |
+| `POST …/salary` | 3: load employee (hire date, status), duplicate check (unique-index lookup), `INSERT` | Single-row lookups | < 0.1 ms |
+| `PUT …/salary/{id}` | 3: employee exists, load record by `id AND employee_id`, `UPDATE salary_record SET amount = ?, currency = ? WHERE id = ?` | Primary-key lookup | < 0.1 ms |
+
+- No request touches another employee's rows. `SalaryRecord` holds `employeeId` as a
+  plain column, not a JPA association, so there is no lazy loading and no N+1.
+- The correction's `UPDATE` sets only `amount` and `currency`. `employee_id`,
+  `effective_date` and `created_at` are mapped `updatable = false`.
+- An employee has at most a handful of salary records (1–5 in the seed), so returning the
+  full history unpaged is fine.
+- The seed inserts 24,901 salary records in about 2–3 seconds (JDBC batches of 1,000).
+
 ## Why this is appropriate for 10,000 employees
 
 The worst case measured, a deep page with no usable ordering index, takes 39 ms. Every

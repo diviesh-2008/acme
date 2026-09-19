@@ -55,29 +55,41 @@ salary changes over time, and see how compensation is distributed.
 ### 4. Salary management
 
 - The HR Manager records a salary change for an employee: **amount**, **currency** and
-  **effective date**.
+  **effective date**. A successful change returns `201 Created`. The record's id and
+  creation time are set by the server; a request that sends them is rejected.
 - Validation rules:
   - The amount is required and greater than zero, with at most 2 decimal places and
     at most 13 digits before the decimal point.
   - The currency is required and must be a valid ISO 4217 code (e.g. `USD`, `EUR`, `INR`).
-  - The effective date is required. It cannot be before the employee's hire date or
-    more than one year in the future.
+    It is accepted in any letter case and stored upper-case.
+  - The effective date is required and may be in the past, today or the future. It
+    cannot be before the employee's hire date or more than one year in the future.
   - Only one salary record is allowed per employee per effective date. A duplicate
     returns `409 Conflict`.
-  - Salary changes cannot be recorded for `TERMINATED` employees.
+  - Salary changes cannot be recorded for `TERMINATED` employees (`409 Conflict`).
 - The HR Manager can **correct** an existing salary record, for example to fix a typo in
-  the amount, by updating its amount and currency. The effective date identifies the
-  record and cannot be changed. Corrections follow the same amount and currency validation.
-- Invalid input returns `400 Bad Request` with the error for each field.
+  the amount, by updating its amount and currency.
+  - The effective date identifies the record and cannot be changed. A correction that
+    includes one is rejected with `400`.
+  - Corrections follow the same amount and currency validation.
+  - Corrections are also allowed for terminated employees, because they fix historical
+    data.
+  - A record can only be corrected through its own employee's URL; otherwise the answer
+    is `404`.
+- Invalid input returns `400 Bad Request` with the error for each field. A missing
+  employee or salary record returns `404 Not Found`.
 
 ### 5. Salary history
 
 - A salary change **adds a new record**. It never overwrites the records for earlier
   dates, so the full history of changes is kept.
 - Salary records are never deleted.
-- The HR Manager can view an employee's full salary history, newest first.
+- Each record stores when it was created (`created_at`, UTC). Corrections do not change it.
+- The HR Manager can view an employee's full salary history, newest first. An employee
+  with no salary records has an empty history.
 - An employee's **current salary** is the record with the latest effective date that
-  is on or before today.
+  is on or before today. If no record has taken effect yet, the API returns `404`
+  rather than inventing a salary.
 - **Future-dated changes are supported** (e.g. an approved raise effective next month).
   They appear in the history as scheduled and become current automatically on their
   effective date.
@@ -87,7 +99,10 @@ salary changes over time, and see how compensation is distributed.
 - Each salary record has its own currency, so different employees can be paid in
   different currencies. This includes, for example, an employee in Germany paid in USD.
 - Amounts are always shown with their currency code.
-- The application never converts between currencies (see Out of scope).
+- Any ISO 4217 code known to the Java platform is accepted. There is no fixed shortlist
+  and no currency table.
+- The application never converts between currencies and never calls an exchange-rate
+  service (see Out of scope).
 
 ### 7. Compensation analytics
 
@@ -99,16 +114,22 @@ salary changes over time, and see how compensation is distributed.
 
 ### 8. Seed data
 
-- The application can load **10,000 deterministic seed employees**, with salary
-  histories, for development and demonstration.
+- The application can load **10,000 deterministic seed employees with deterministic
+  salary histories** for development and demonstration. Salary histories are included
+  so that compensation analytics can be demonstrated as soon as it exists, without
+  first entering thousands of salaries by hand.
+- **Volume:** 10,000 employees and about 24,901 salary records (exactly 24,901 with
+  the current generator).
 - "Deterministic" means that every run produces exactly the same employees, salaries
   and dates, so demos, screenshots and bug reports can be reproduced.
 - The seed data covers several countries and currencies, all departments, all
   employment statuses, multi-entry salary histories and some future-dated changes.
-- Seeding is off by default, runs only with the `dev` profile (and in the integration-test
-  context), and never runs in production. It loads only into an empty employee table, so
+  Every employee has a salary from their hire date, and about 5% have a raise scheduled
+  for 2027-01-01.
+- **Development and demo data only.** Seeding is off by default and runs only with the
+  `dev` profile (or in the integration-test context). Neither employees nor salaries are
+  ever generated automatically in production. Each table is loaded only while empty, so
   restarts never duplicate data.
-- Employees are seeded now; salary histories are added with salary management.
 
 ## Non-functional requirements
 

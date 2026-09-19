@@ -2,9 +2,8 @@
 
 MySQL 8, InnoDB, `utf8mb4` with the `utf8mb4_0900_ai_ci` collation. The schema is
 created only by Flyway migrations in `backend/src/main/resources/db/migration`, and
-Hibernate validates against it. `app_user` and `employee` exist; `salary_record` is the
-planned design and lands with the salary history step. Measured query plans are in
-[performance.md](performance.md).
+Hibernate validates against it. All three tables exist: `app_user` (V1), `employee` (V2)
+and `salary_record` (V3). Measured query plans are in [performance.md](performance.md).
 
 ## Entity relationships
 
@@ -23,7 +22,8 @@ planned design and lands with the salary history step. Measured query plans are 
 │  employee_code (UK)│                 │  employee_id (FK)    │
 │  email (UK)        │                 │  amount, currency    │
 │  …                 │                 │  effective_date      │
-└────────────────────┘                 └──────────────────────┘
+└────────────────────┘                 │  created_at          │
+                                       └──────────────────────┘
 ```
 
 - **employee 1 → 0..\* salary_record.** An employee has a full salary history.
@@ -63,14 +63,18 @@ Read-only in v1 (the entity is Hibernate `@Immutable`). Created by
 
 | Column | Type | Null | Notes |
 |--------|------|:---:|-------|
-| `id` | `BIGINT AUTO_INCREMENT` | No | Primary key |
-| `employee_id` | `BIGINT` | No | FK → `employee(id)`, `ON DELETE RESTRICT` |
-| `amount` | `DECIMAL(15,2)` | No | Annual gross base salary. `CHECK (amount > 0)` |
-| `currency` | `CHAR(3)` | No | ISO 4217, `CHECK (currency REGEXP '^[A-Z]{3}$')`. The application also validates against `java.util.Currency`. |
-| `effective_date` | `DATE` | No | Date the salary takes effect. Can be in the future. Not updatable. |
+| `id` | `BIGINT AUTO_INCREMENT` | No | Primary key. Used in `PUT /api/employees/{employeeId}/salary/{salaryId}`. |
+| `employee_id` | `BIGINT` | No | FK → `employee(id)`, `ON DELETE RESTRICT`. Mapped as a plain `Long`, not a JPA association. Not updatable. |
+| `amount` | `DECIMAL(15,2)` | No | Annual gross base salary, Java `BigDecimal` (never floating point). `CHECK (amount > 0)` |
+| `currency` | `CHAR(3)` | No | ISO 4217 format, `CHECK (REGEXP_LIKE(currency, '^[A-Z]{3}$', 'c'))`. The application also checks the code against the JDK's ISO 4217 list (`java.util.Currency`). |
+| `effective_date` | `DATE` | No | First day the salary applies. Can be past, today or future. Not updatable. |
+| `created_at` | `DATETIME(6)` | No | When the row was added, in UTC, set from the application `Clock`. Not updatable, so corrections keep the original. `DATETIME` rather than `TIMESTAMP` avoids the 2038 limit and session time-zone conversion. There is no database default, because MySQL's `CURRENT_TIMESTAMP` would use the session time zone. |
 
 A new salary change inserts a row. A correction updates `amount` and `currency` on the
-existing row for that effective date. Rows are never deleted.
+existing row for that effective date; nothing else changes. Rows are never deleted.
+There is no `effective_to` column and no stored "current salary". Both are derived from
+`effective_date` (see [Key queries](#key-queries)). Created by
+`V3__create_salary_record.sql`.
 
 ## Constraints
 
@@ -82,7 +86,7 @@ existing row for that effective date. Rows are never deleted.
 | `employee` | `uk_employee_email UNIQUE (email)` | No two employees share an email |
 | `employee` | `ck_employee_status`, `ck_employee_country_code` | Only valid statuses and code formats |
 | `salary_record` | `fk_salary_record_employee FOREIGN KEY (employee_id) REFERENCES employee(id) ON DELETE RESTRICT` | No orphaned salaries. Salary history can never be removed by deleting an employee. |
-| `salary_record` | `uk_salary_record_employee_date UNIQUE (employee_id, effective_date)` | One salary per employee per date, so "salary on date X" is unambiguous. A mistake is corrected by updating this row, not by adding another. |
+| `salary_record` | `uk_salary_record_employee_date UNIQUE (employee_id, effective_date)` | One salary per employee per date, so "salary on date X" is unambiguous. A mistake is corrected by updating this row, not by adding another. It is also the **final guard against concurrent duplicates**: the service checks first so it can give a clear `409`, but two simultaneous requests can both pass that check, and then this constraint rejects the second insert (also reported as `409`). |
 | `salary_record` | `ck_salary_record_amount`, `ck_salary_record_currency` | Last line of defence behind application validation |
 
 MySQL enforces `CHECK` constraints from version 8.0.16. Database constraints back up
@@ -103,8 +107,17 @@ checked with `EXPLAIN ANALYZE` against the 10,000-row seed (see
 | `idx_employee_name` | `employee(last_name, first_name)` | The default list order `last_name, first_name, id`. InnoDB appends the primary key to every secondary index, so this is effectively `(last_name, first_name, id)`, and a page is read in index order with no sort step. Search and status-filtered lists also walk this index and stop once the page is full. |
 | `idx_employee_country_name` | `employee(country_code, last_name, first_name)` | Country filter, returned in list order without a sort. The leading column also serves plain country lookups and per-country analytics later. |
 | `idx_employee_department_name` | `employee(department, last_name, first_name)` | Department filter, as above. |
-| `uk_salary_record_employee_date` *(planned)* | `salary_record(employee_id, effective_date)` | Salary history for one employee (newest first); current salary lookup; `PARTITION BY employee_id ORDER BY effective_date` in analytics. It also serves as the index for the foreign key. |
+| `uk_salary_record_employee_date` | `salary_record(employee_id, effective_date)` | Every salary query: current salary (reverse range scan, 1 row), history (reverse index lookup, no sort), the duplicate-date check, and later `PARTITION BY employee_id ORDER BY effective_date` in analytics. It also serves as the foreign-key index. |
 | `uk_app_user_email` | `app_user(email)` | Login |
+
+**Why `salary_record` has no other index.** Both an `employee_id` index and an
+`(employee_id, effective_date)` index were requested; the unique constraint *is* the
+`(employee_id, effective_date)` index. Its leading column serves every
+`employee_id` lookup, so a separate `employee_id` index would be redundant. InnoDB requires
+an index whose first column is the foreign-key column, and this one qualifies, so
+MySQL created no extra foreign-key index. `SHOW INDEX` lists only `PRIMARY` and
+`uk_salary_record_employee_date`. The measured plans are in
+[performance.md](performance.md#salary-queries).
 
 **Why the list indexes don't declare `id`.** The list is ordered by
 `last_name, first_name, id`, so we evaluated declaring `id` explicitly as the last index
@@ -160,11 +173,11 @@ Spring Data skips the count when the first page already holds every match.
 
 ## Key queries
 
-**Current salary for one employee** (a single index range read on
-`uk_salary_record_employee_date`):
+**Current salary for one employee** (a reverse range scan on
+`uk_salary_record_employee_date` that stops after one row):
 
 ```sql
-SELECT amount, currency, effective_date
+SELECT id, amount, currency, effective_date, employee_id, created_at
 FROM salary_record
 WHERE employee_id = :employeeId
   AND effective_date <= :today
@@ -172,7 +185,17 @@ ORDER BY effective_date DESC
 LIMIT 1;
 ```
 
-**Current salaries for analytics** (one pass over salary history, grouped per currency):
+For example, with records dated 2025-01-01 (800,000), 2026-01-01 (900,000) and
+2027-01-01 (1,000,000), the query returns 900,000 for any date from 2026-01-01 to
+2026-12-31, and 1,000,000 from 2027-01-01. Nothing has to change when the date passes.
+
+**Salary history for one employee** (reverse index lookup, no sort):
+
+```sql
+SELECT … FROM salary_record WHERE employee_id = :employeeId ORDER BY effective_date DESC;
+```
+
+**Current salaries for analytics** (planned; one pass over salary history, grouped per currency):
 
 ```sql
 WITH current_salary AS (
@@ -209,17 +232,22 @@ the result doesn't depend on the database server's time zone and tests can fix t
   Simultaneous corrections to the same record are last-write-wins, which is acceptable
   for a small HR team.
 - **`DECIMAL(15,2)`** holds up to 9,999,999,999,999.99, enough for annual salaries in
-  high-denomination currencies such as IDR or VND. Java maps it to `BigDecimal`.
-- **No audit or timestamp columns** (`created_at`, `created_by` and similar). v1 has no
-  feature that reads them, and audit logging is out of scope. They can be added by a
-  later migration if they become required.
+  high-denomination currencies such as IDR or VND. Java maps it to `BigDecimal`. The
+  API accepts at most 13 digits before the decimal point and 2 after it, so a value that
+  doesn't fit gets `400`, never a database error.
+- **One timestamp, no audit trail.** `salary_record.created_at` records when a row was
+  added. There is no `created_by`, `updated_at` or audit table, so a correction replaces
+  the old amount without keeping it. Audit logging is out of scope for v1 and can be added
+  by a later migration.
+- **No currency table.** Currency codes are validated in the API against the JDK's
+  ISO 4217 list, and the `CHECK` constraint guards the format.
 - **Collation `utf8mb4_0900_ai_ci`** is declared explicitly on each table, so
   case-insensitive search behaves the same regardless of server defaults. It is also
   accent-insensitive, so a search for `jose` would match `José`.
 - **`CHECK` violations surface as generic errors.** Spring reports MySQL error 3819
   (check constraint violated) as `UncategorizedSQLException`, not
-  `DataIntegrityViolationException`. That doesn't matter while employees are
-  read-only, but a future write path should validate before inserting.
+  `DataIntegrityViolationException`. The salary API validates amount and currency before
+  inserting, so these checks are only a last line of defence.
 
 ## Migration plan
 
@@ -227,6 +255,6 @@ the result doesn't depend on the database server's time zone and tests can fix t
 |-----------|-----------|----------|
 | `V1__create_app_user.sql` | 2: Authentication *(done)* | `app_user` |
 | `V2__create_employee.sql` | 3: Employee domain *(done)* | `employee` with its constraints and indexes |
-| `V3__create_salary_record.sql` | Salary history | `salary_record` with its constraints and index |
+| `V3__create_salary_record.sql` | 4: Salary history *(done)* | `salary_record` with its constraints and unique index |
 
 Seed data is **not** a migration (see [architecture.md](architecture.md#seed-strategy)).
