@@ -36,14 +36,21 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 	protected ResponseEntity<Object> handleMethodArgumentNotValid(MethodArgumentNotValidException ex,
 			HttpHeaders headers, HttpStatusCode status, WebRequest request) {
 		Map<String, String> errors = new LinkedHashMap<>();
+		// A value of the wrong type (e.g. page=abc) gets a plain message instead of Java conversion details.
 		ex.getBindingResult()
 			.getFieldErrors()
-			.forEach(error -> errors.putIfAbsent(error.getField(), error.getDefaultMessage()));
+			.forEach(error -> errors.putIfAbsent(error.getField(),
+					error.isBindingFailure() ? "Invalid value" : error.getDefaultMessage()));
 
 		ProblemDetail problem = ex.getBody();
 		problem.setDetail("One or more fields are invalid.");
 		problem.setProperty("errors", errors);
 		return handleExceptionInternal(ex, problem, headers, status, request);
+	}
+
+	@ExceptionHandler(NotFoundException.class)
+	ProblemDetail handleNotFound(NotFoundException ex) {
+		return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
 	}
 
 	/** Failed login. The message is the same for an unknown email and a wrong password. */

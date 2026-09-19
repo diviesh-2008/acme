@@ -39,13 +39,18 @@ salary changes over time, and see how compensation is distributed.
 
 ### 3. Employee search, filtering and pagination
 
-- The employee list is paginated on the server. The default page size is 20 and the maximum is 100.
-- Free-text search matches employee name, email or employee ID (e.g. `EMP-00042`).
-  Matching is case-insensitive and finds partial text anywhere in the value.
+- The employee list is paginated on the server. The default page size is 20 and the
+  maximum is 100. An invalid page or size returns `400`.
+- Free-text search matches employee name (first, last or full), email or employee ID
+  (e.g. `EMP-00042`). Matching is case-insensitive and finds partial text anywhere in
+  the value.
 - Results can be filtered by country, department and employment status
   (`ACTIVE`, `ON_LEAVE`, `TERMINATED`). Filters combine with each other and with search.
-- Results can be sorted, and the ordering is stable across pages.
-- The HR Manager can open an employee to see their details and current salary.
+- Results come in a fixed order (last name, first name, then employee record id), which
+  is stable across pages. Client-chosen sorting is not part of v1.
+- The HR Manager can open an employee to see their details. Their current salary is
+  added with salary management.
+- Missing employees return `404`.
 
 ### 4. Salary management
 
@@ -100,7 +105,10 @@ salary changes over time, and see how compensation is distributed.
   and dates, so demos, screenshots and bug reports can be reproduced.
 - The seed data covers several countries and currencies, all departments, all
   employment statuses, multi-entry salary histories and some future-dated changes.
-- Seeding is off by default and never runs in tests or production.
+- Seeding is off by default, runs only with the `dev` profile (and in the integration-test
+  context), and never runs in production. It loads only into an empty employee table, so
+  restarts never duplicate data.
+- Employees are seeded now; salary histories are added with salary management.
 
 ## Non-functional requirements
 

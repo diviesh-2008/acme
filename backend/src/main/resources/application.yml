@@ -7,6 +7,10 @@ spring:
     url: ${ACME_DB_URL:jdbc:mysql://localhost:3306/acme_salary}
     username: ${ACME_DB_USERNAME:}
     password: ${ACME_DB_PASSWORD:}
+    hikari:
+      data-source-properties:
+        # Lets the MySQL driver send JDBC batches (e.g. the dev seed) as multi-row inserts.
+        rewriteBatchedStatements: true
 
   jpa:
     # Keep persistence inside the service layer; no lazy loading during view rendering.
@@ -38,3 +42,7 @@ acme:
   initial-hr:
     email: ${ACME_INITIAL_HR_EMAIL:}
     password: ${ACME_INITIAL_HR_PASSWORD:}
+
+  seed:
+    # Demo data; enabled only by the dev profile (application-dev.yml).
+    enabled: false

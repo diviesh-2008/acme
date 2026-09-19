@@ -109,19 +109,23 @@ Code is organized by feature, with layers inside each feature:
 com.acme.salary
 ├── auth/        AuthController, AuthService, JwtTokenService, AppUser entity + repository,
 │                AppUserDetailsService, InitialHrManagerInitializer, dto/
-├── employee/    EmployeeController, EmployeeService, EmployeeRepository, Employee entity, dto/
-├── salary/      SalaryController, SalaryService, SalaryRecordRepository, SalaryRecord entity, dto/
-├── analytics/   AnalyticsController, AnalyticsService, AnalyticsRepository (native queries), dto/
-├── seed/        deterministic seed-data generator and loader (dev only)
+├── employee/    EmployeeController, EmployeeService, EmployeeRepository, EmployeeSpecifications,
+│                Employee entity, EmploymentStatus, dto/ (EmployeeResponse, EmployeeSearchCriteria)
+├── salary/      (planned) SalaryController, SalaryService, SalaryRecordRepository, SalaryRecord entity, dto/
+├── analytics/   (planned) AnalyticsController, AnalyticsService, AnalyticsRepository (native queries), dto/
+├── seed/        EmployeeSeedGenerator (deterministic), EmployeeSeedLoader (dev only)
 └── common/
     ├── security/  SecurityConfig (filter chain, BCrypt, JWT encoder/decoder), JwtProperties,
     │              SecurityProblemHandler (401/403 → GlobalExceptionHandler)
-    ├── error/     GlobalExceptionHandler
-    └── ClockConfig, PageResponse (with the employee query API)
+    ├── error/     GlobalExceptionHandler, NotFoundException
+    └── ClockConfig, PageResponse
 ```
 
 Keeping a feature's controller, service and repository together makes each increment
-self-contained and easy to review. The layer rules still apply within a feature:
+self-contained and easy to review. Each feature is one flat package plus `dto/`, rather
+than `controller/`, `service/` and `entity/` sub-packages. With a handful of classes per
+feature, the extra packages would only force wider visibility. The layer rules still apply
+within a feature:
 
 - **Controllers** handle HTTP only: binding, `@Valid` validation and status codes.
   They call services and never touch repositories.
@@ -179,34 +183,66 @@ are never added together or averaged together.**
 - If exchange rates are added later, a converted "reporting currency" view can sit
   next to the per-currency figures without changing the data model.
 
+## Employee API
+
+Read-only; both endpoints require the `HR_MANAGER` role.
+
+| Endpoint | Returns |
+|----------|---------|
+| `GET /api/employees?page=&size=&search=&country=&department=&status=` | `200` `PageResponse<EmployeeResponse>` |
+| `GET /api/employees/{id}` | `200` `EmployeeResponse`, or `404` |
+
+Query parameters bind to the `EmployeeSearchCriteria` record, which is validated with
+Bean Validation. `EmployeeSpecifications` turns it into a JPA `Specification`, and
+`EmployeeRepository.findAll(spec, pageRequest)` runs it. The filtering, ordering, paging
+and count all happen in MySQL. Measured plans are in [performance.md](performance.md).
+
 ## Pagination strategy
 
-- **Offset pagination** with Spring Data `Pageable`:
-  `GET /api/employees?page=0&size=20&sort=lastName,asc&search=…&country=…&department=…&status=…`
-- **Page size**: default 20, capped at 100 on the server, so a client cannot request all
-  10,000 rows in one call.
-- **Sorting**: only whitelisted fields can be sorted (`lastName`, `firstName`,
-  `employeeCode`, `hireDate`, `country`, `department`). Unknown fields return `400`.
-  `id` is always added as a final tie-breaker, so rows never repeat or disappear
-  between pages.
+- **Offset pagination** with Spring Data `PageRequest`:
+  `GET /api/employees?page=0&size=20`.
+- **Page size**: default 20, maximum 100.
+- **Invalid values are rejected, not corrected.** `page < 0`, `size < 1`, `size > 100` and
+  non-numeric values return `400` with an error per field, from the central handler.
+  Silently capping `size=1000` to 100 would hide client bugs.
+- **Fixed ordering**: `last_name, first_name, id`, all ascending. The `id` tie-breaker
+  makes paging deterministic when names repeat, so rows never appear on two pages or go
+  missing. There is **no client-controlled sorting** in v1. Every sortable column would
+  need its own index to stay fast, and the UI doesn't need it yet. It can be added later
+  with a whitelist of fields.
 - **Response**: our own `PageResponse<T>` record (`content`, `page`, `size`,
-  `totalElements`, `totalPages`), not a serialized Spring `Page`. That keeps the JSON
-  contract stable and free of Spring Data internals.
-- **Search**: case-insensitive substring match on first name, last name, full name,
-  email and employee code. User-typed `%` and `_` are escaped, so they are treated as
-  literal characters rather than wildcards. Case-insensitivity comes from the
-  `utf8mb4_0900_ai_ci` collation, so the SQL needs no `LOWER()` calls.
+  `totalElements`, `totalPages`, `hasNext`, `hasPrevious`), not a serialized Spring
+  `Page`. That keeps the JSON contract stable and free of Spring Data internals.
 - **Why not keyset pagination?** The UI needs total counts and jump-to-page. At 10,000
-  rows, `COUNT(*)` and `OFFSET` cost milliseconds. Keyset pagination would be worth
-  revisiting only at millions of rows.
-- **Filter options**: `GET /api/employees/filter-options` returns the distinct
-  countries and departments and the list of statuses, so dropdowns always match the data.
+  rows, `COUNT` and `OFFSET` cost milliseconds (a deep page takes about 39 ms). Keyset
+  pagination would be worth revisiting only at millions of rows.
+
+## Search and filter strategy
+
+- **Search** (`search=`) is a case-insensitive substring match on employee code, first
+  name, last name, full name (`"first last"`, so `john smith` works) and email. The
+  conditions are OR'ed.
+- **Filters** (`country`, `department`, `status`) are exact matches, AND'ed with each
+  other and with search. Blank values are ignored. `country` is uppercased before
+  querying, and `department` matching ignores letter case through the collation.
+- **Case-insensitivity comes from the `utf8mb4_0900_ai_ci` collation**, so the SQL has no
+  `LOWER()` calls. The collation is also accent-insensitive.
+- **Wildcards are escaped.** User-typed `%` and `_` match literally (`!` is the `LIKE`
+  escape character; a backslash would clash with MySQL's string escaping).
+- **Validation:** `search` and `department` are limited to 100 characters, and `country`
+  must be two letters. `status` must be `ACTIVE`, `ON_LEAVE` or `TERMINATED` (exact case).
+  Anything else returns `400`.
+- **Why Specifications?** They build a WHERE clause from optional conditions using plain
+  JPA, with no extra library. Four optional filters would otherwise need 16 repository
+  methods or hand-built JPQL strings.
+- **Filter options** for UI dropdowns (distinct countries and departments) are planned
+  with the employee list UI.
 
 ## Testing strategy
 
 | Layer | Tooling | Needs Docker | Runs in | What it covers |
 |-------|---------|:---:|---------|----------------|
-| Unit | JUnit 5, Mockito, AssertJ | No | `./mvnw test` (Surefire, `*Test`) | Service rules (current-salary choice, validation, terminated-employee guard), seed generator determinism, sort whitelist |
+| Unit | JUnit 5, Mockito, AssertJ | No | `./mvnw test` (Surefire, `*Test`) | Service rules, paging and ordering requests, which SQL conditions each filter produces, seed generator determinism, seed loader idempotency |
 | Web slice | `@WebMvcTest` + MockMvc | No | `./mvnw test` (Surefire, `*Test`) | Request validation, status codes, `ProblemDetail` bodies, 401/403 behaviour, DTO JSON shape |
 | Integration | `@IntegrationTest` (`@SpringBootTest` + Testcontainers MySQL) | Yes | `./mvnw verify` (Failsafe, `*IT`) | Flyway migrations, repository queries (search, filters, pagination, current salary, analytics SQL), login → protected API end to end |
 
@@ -220,8 +256,11 @@ are never added together or averaged together.**
 - **Deterministic.**
   - The MySQL image version is pinned.
   - A fixed `Clock` is injected, so "today" never depends on when tests run.
-  - Tests create the exact data they assert on and never rely on the 10k seed.
-    Seeding is disabled in tests.
+  - The integration-test context loads the 10,000-employee seed once per run. That tests
+    the loader against MySQL and runs queries at realistic volume.
+  - Search and filter tests assert on their own fixture rows, whose values the seed never
+    generates (surname "Quillfeather", country `NZ`, department "Research Lab"). They
+    don't depend on which names the generator happened to pick.
   - Integration tests use MockMvc in the test thread and are `@Transactional`, so each
     test's data is rolled back.
   - No test depends on execution order.
@@ -236,32 +275,37 @@ are never added together or averaged together.**
 ## Seed strategy
 
 - **Separate from schema migrations.** Flyway migrations contain only schema and run in
-  every environment. Demo data is loaded by a `seed` component that runs only when
-  `acme.seed.enabled=true`. That is set by the `dev` profile and off by default,
-  including in tests and production.
-- **Idempotent.** The loader runs only when the `employee` table is empty, so restarting
-  the app never duplicates data.
+  every environment. Demo data is loaded by `EmployeeSeedLoader`, which exists only when
+  `acme.seed.enabled=true`. The `dev` profile (`application-dev.yml`) sets that, and so
+  does the integration-test context. It is off by default, so production never seeds.
+- **Idempotent.** The loader inserts only when the `employee` table is empty. Restarting
+  never duplicates data, and it never tops up a partially filled table.
+- **Synchronous, before requests.** Like the initial HR account, the loader runs as a
+  `SmartInitializingSingleton`, after migrations but before the web server accepts
+  requests. No request can see a half-seeded table.
+- **All or nothing.** Rows are inserted in one transaction. A failure leaves the table
+  empty, and the next startup retries.
 - **Deterministic.**
-  - The generator uses `java.util.Random` with a fixed seed. Its algorithm is fixed by
-    the Java SE specification, so every JVM produces the same sequence.
-  - All dates are calculated from a fixed reference date (2026-01-01), never from
+  - `EmployeeSeedGenerator` is a pure class using `java.util.Random` with a fixed seed.
+    That algorithm is fixed by the Java SE specification, so every JVM produces the same
+    sequence.
+  - Hire dates fall between the fixed dates 2010-01-01 and 2026-01-01, never relative to
     `LocalDate.now()`.
-  - Employee codes run in order from `EMP-00001` to `EMP-10000`.
-  - Emails are built from the name plus the employee code, so they are unique.
+  - Each employee consumes the same random draws in the same order.
+  - Employee codes run from `EMP-00001` to `EMP-10000`. Emails are
+    `first.last<number>@acme.example`, unique by construction, on a reserved domain.
+  - A unit test pins the first generated employee, so an accidental change to the data
+    is caught.
 - **Realistic shape.**
-  - About 8 countries, each paid mostly in its local currency, with a small share paid
-    in USD to exercise multi-currency.
-  - About 8 departments, with salary bands per country and department.
-  - Status mix of roughly 90% `ACTIVE`, 5% `ON_LEAVE` and 5% `TERMINATED`.
-  - 1–4 salary records per employee, as yearly raises since hire.
-  - About 5% of employees have a future-dated raise.
-  - Emails use the reserved `acme.example` domain.
-- **Fast.** JDBC batch inserts in a single transaction, with `rewriteBatchedStatements`
-  enabled on the MySQL driver. That takes about 10k employee rows and about 25k salary
-  rows in a few seconds, rather than through 35k JPA `persist` calls.
-- **Tested.** A unit test checks that the generator yields exactly 10,000 employees and
-  that two runs produce identical output. An integration test checks that the loader
-  inserts them and is idempotent.
+  - 50 first and 50 last names from several cultures. Names repeat, which exercises the
+    `id` tie-breaker.
+  - 8 countries with weights: US 30%, IN 16%, GB 14%, DE 10%, AU 10%, CA 8%, FR 7%,
+    SG 5%.
+  - 9 departments, each with its own job titles; Engineering is 35%.
+  - Status mix of 90% `ACTIVE`, 4% `ON_LEAVE` and 6% `TERMINATED`.
+- **Fast.** JDBC batch inserts of 1,000 rows, with `rewriteBatchedStatements` enabled on
+  the MySQL driver. It takes about 3 seconds instead of 10,000 JPA `save()` calls.
+- **Salary histories** will be seeded the same way with the salary history step.
 - **Why not a Flyway Java migration?** It would mix demo data into schema history and run
   in every environment, including production.
 
@@ -273,6 +317,7 @@ are never added together or averaged together.**
 | `ACME_DB_USERNAME` / `ACME_DB_PASSWORD` | *none* | Database credentials |
 | `ACME_JWT_SECRET` | *none; required* | HS256 signing key (≥ 32 bytes) |
 | `ACME_INITIAL_HR_EMAIL` / `ACME_INITIAL_HR_PASSWORD` | *none* | Creates the initial HR Manager account if absent (password 12 characters to 72 bytes) |
+| `SPRING_PROFILES_ACTIVE` | *none* | `dev` enables the 10,000-employee seed |
 
 Nothing that is secret in a shared environment is committed.
 
@@ -282,14 +327,13 @@ Each increment is independently reviewable and committable.
 
 1. **Project foundation**: Spring Boot project, configuration, test infrastructure, docs. *(done)*
 2. **Authentication**: `app_user` migration, BCrypt, initial-user bootstrap, login endpoint, JWT issuing and validation, 401/403 handling, and the global `ProblemDetail` error handler. *(done)*
-3. **Employee schema and seed data**: `employee` + `salary_record` migrations and the deterministic 10k seed.
-4. **Employee query API**: `PageResponse` DTO, pagination, search, filters, filter options, employee detail.
-5. **Salary history API**: record a salary change, correct a record, list history, current salary.
-6. **Analytics API**: per-currency aggregates overall, by country and by department.
-7. **Angular foundation**: project setup, login page, auth interceptor and route guard.
-8. **Employee list UI**: Material table with server-side pagination, search and filters.
-9. **Employee detail and salary history UI**: history table, add-salary and correct-salary forms.
-10. **Analytics UI**.
+3. **Employee domain**: `employee` migration, deterministic 10k seed, read-only list API (search, filters, pagination) and employee detail. *(done)*
+4. **Salary history API**: `salary_record` migration and seeded histories; record a salary change, correct a record, list history, current salary.
+5. **Analytics API**: per-currency aggregates overall, by country and by department.
+6. **Angular foundation**: project setup, login page, auth interceptor and route guard.
+7. **Employee list UI**: Material table with server-side pagination, search and filters, plus the filter-options endpoint.
+8. **Employee detail and salary history UI**: history table, add-salary and correct-salary forms.
+9. **Analytics UI**.
 
 ## Resolved decisions
 
@@ -302,3 +346,6 @@ Each increment is independently reviewable and committable.
 | How is a mistaken salary entry corrected? | By updating that record's amount and currency. There is one record per employee per effective date, and no superseding records. |
 | Is there an audit log? | Not in v1. Only fields the application uses are stored. |
 | What if Docker is unavailable for integration tests? | They fail, never skip, so a green build means they ran. |
+| Can clients choose the sort order? | Not in v1. The order is fixed at last name, first name, id. |
+| What happens with `size=1000`? | `400`, not silently capped. The maximum is 100. |
+| Which statuses get an index? | None. It's too unselective; see [database-design.md](database-design.md#indexes). |

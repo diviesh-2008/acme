@@ -2,8 +2,9 @@
 
 MySQL 8, InnoDB, `utf8mb4` with the `utf8mb4_0900_ai_ci` collation. The schema is
 created only by Flyway migrations in `backend/src/main/resources/db/migration`, and
-Hibernate validates against it. This document is the proposed design. Each table's
-DDL lands in the increment that first needs it.
+Hibernate validates against it. `app_user` and `employee` exist; `salary_record` is the
+planned design and lands with the salary history step. Measured query plans are in
+[performance.md](performance.md).
 
 ## Entity relationships
 
@@ -44,16 +45,19 @@ DDL lands in the increment that first needs it.
 
 | Column | Type | Null | Notes |
 |--------|------|:---:|-------|
-| `id` | `BIGINT AUTO_INCREMENT` | No | Primary key. Internal only. |
+| `id` | `BIGINT AUTO_INCREMENT` | No | Primary key. Used in API URLs (`/api/employees/{id}`). |
 | `employee_code` | `VARCHAR(20)` | No | Business ID shown to users, e.g. `EMP-00042`. Unique. |
 | `first_name` | `VARCHAR(100)` | No | |
 | `last_name` | `VARCHAR(100)` | No | |
-| `email` | `VARCHAR(255)` | No | Unique |
+| `email` | `VARCHAR(255)` | No | Unique. Case-insensitive through the collation, so `A@x` and `a@x` collide. |
 | `job_title` | `VARCHAR(100)` | No | |
 | `department` | `VARCHAR(100)` | No | Plain column; see [Design notes](#design-notes). |
-| `country_code` | `CHAR(2)` | No | ISO 3166-1 alpha-2, `CHECK (country_code REGEXP '^[A-Z]{2}$')` |
-| `employment_status` | `VARCHAR(20)` | No | `CHECK (employment_status IN ('ACTIVE','ON_LEAVE','TERMINATED'))` |
-| `hire_date` | `DATE` | No | |
+| `country_code` | `CHAR(2)` | No | ISO 3166-1 alpha-2 format, `CHECK (REGEXP_LIKE(country_code, '^[A-Z]{2}$', 'c'))`. The `'c'` flag makes the check case-sensitive despite the `_ci` collation, so `us` is rejected. The check enforces the format; whether a code is a real country is up to the data source. |
+| `employment_status` | `VARCHAR(20)` | No | `CHECK (employment_status IN ('ACTIVE','ON_LEAVE','TERMINATED'))`. `VARCHAR` rather than MySQL `ENUM`, so adding a status is a simple constraint change. |
+| `hire_date` | `DATE` | No | Java `LocalDate` |
+
+Read-only in v1 (the entity is Hibernate `@Immutable`). Created by
+`V2__create_employee.sql`.
 
 ### `salary_record`
 
@@ -87,25 +91,72 @@ and `409` errors before any constraint is hit.
 
 ## Indexes
 
-Each index maps to a query the application actually runs.
+Each index maps to a query the application actually runs. The employee indexes were
+checked with `EXPLAIN ANALYZE` against the 10,000-row seed (see
+[performance.md](performance.md)).
 
 | Index | Columns | Serves |
 |-------|---------|--------|
-| `PRIMARY` | `employee(id)` | Employee detail; joins |
-| `uk_employee_code` | `employee(employee_code)` | Uniqueness; lookup by business ID |
-| `uk_employee_email` | `employee(email)` | Uniqueness; lookup by email |
-| `idx_employee_name` | `employee(last_name, first_name)` | Default list order (`last_name, first_name, id`) with `LIMIT` |
-| `idx_employee_country` | `employee(country_code)` | Country filter; analytics by country |
-| `idx_employee_department` | `employee(department)` | Department filter; analytics by department; filter-option `DISTINCT` |
-| `idx_employee_status` | `employee(employment_status)` | Status filter; analytics exclude `TERMINATED` |
-| `uk_salary_record_employee_date` | `salary_record(employee_id, effective_date)` | Salary history for one employee (newest first); current salary lookup; `PARTITION BY employee_id ORDER BY effective_date` in analytics. It also serves as the index for the foreign key. |
+| `PRIMARY` | `employee(id)` | Employee detail (`/api/employees/{id}`) |
+| `uk_employee_code` | `employee(employee_code)` | Uniqueness. It does *not* speed up search, because `LIKE '%term%'` cannot use it. |
+| `uk_employee_email` | `employee(email)` | Uniqueness, case-insensitive. Also not used by substring search. |
+| `idx_employee_name` | `employee(last_name, first_name)` | The default list order `last_name, first_name, id`. InnoDB appends the primary key to every secondary index, so this is effectively `(last_name, first_name, id)`, and a page is read in index order with no sort step. Search and status-filtered lists also walk this index and stop once the page is full. |
+| `idx_employee_country_name` | `employee(country_code, last_name, first_name)` | Country filter, returned in list order without a sort. The leading column also serves plain country lookups and per-country analytics later. |
+| `idx_employee_department_name` | `employee(department, last_name, first_name)` | Department filter, as above. |
+| `uk_salary_record_employee_date` *(planned)* | `salary_record(employee_id, effective_date)` | Salary history for one employee (newest first); current salary lookup; `PARTITION BY employee_id ORDER BY effective_date` in analytics. It also serves as the index for the foreign key. |
 | `uk_app_user_email` | `app_user(email)` | Login |
 
-**Search note.** Substring search (`LIKE '%term%'`) cannot use a B-tree index, so it
-scans the 10,000 employee rows. That takes single-digit milliseconds, so full-text
-indexing isn't justified at this size. Single-column filter indexes are cheap to
-maintain. The optimizer picks the most selective one, and the plans will be checked
-with `EXPLAIN` when the query API is built.
+**Why the list indexes don't declare `id`.** The list is ordered by
+`last_name, first_name, id`, so we evaluated declaring `id` explicitly as the last index
+column, e.g. `(country_code, last_name, first_name, id)`. It isn't needed:
+
+- InnoDB stores every secondary-index entry with the primary key appended, so entries are
+  already ordered by `(…, last_name, first_name, id)`.
+- `EXPLAIN ANALYZE` on the 10,000-row seed confirms it. The default, country and
+  department lists read exactly `offset + size` index entries in order, with **no sort
+  step** (see [performance.md](performance.md#index-order-and-the-id-tie-breaker)).
+- The plans are the same even with `optimizer_switch='use_index_extensions=off'`.
+- The integration test `employeesWithTheSameNameAreOrderedById` checks the tie-break
+  against MySQL.
+
+Declaring `id` would produce the same physical order, so it would only document intent.
+It would matter only on a storage engine that doesn't cluster by primary key, and this
+schema is InnoDB-only.
+
+**Evaluated and not added:**
+
+- **`employment_status`.** It has three values, and about 90% of rows are `ACTIVE`, so
+  MySQL would not use an index for the common case. Filtering by the rarer statuses
+  walks `idx_employee_name` and stops once a page is full (2.7 ms measured for
+  `TERMINATED`).
+- **Single-column country and department indexes.** The composite versions above serve
+  the same filters *and* the sort order, so separate indexes would be redundant.
+- **Full-text or n-gram search indexes.** Substring search over 10,000 rows takes
+  single-digit milliseconds without them.
+
+## Employee list query
+
+A list request runs two statements, generated by Spring Data from a JPA `Specification`.
+Every condition is optional:
+
+```sql
+SELECT id, employee_code, first_name, last_name, email, job_title, department,
+       country_code, employment_status, hire_date
+FROM employee
+WHERE (employee_code LIKE :term ESCAPE '!' OR first_name LIKE :term ESCAPE '!'
+       OR last_name LIKE :term ESCAPE '!'
+       OR CONCAT(first_name, ' ', last_name) LIKE :term ESCAPE '!'
+       OR email LIKE :term ESCAPE '!')              -- search, :term = '%john%'
+  AND country_code = :country                       -- country filter
+  AND department = :department                      -- department filter
+  AND employment_status = :status                   -- status filter
+ORDER BY last_name, first_name, id
+LIMIT :offset, :size;
+
+SELECT COUNT(id) FROM employee WHERE <same conditions>;
+```
+
+Spring Data skips the count when the first page already holds every match.
 
 ## Key queries
 
@@ -163,13 +214,19 @@ the result doesn't depend on the database server's time zone and tests can fix t
   feature that reads them, and audit logging is out of scope. They can be added by a
   later migration if they become required.
 - **Collation `utf8mb4_0900_ai_ci`** is declared explicitly on each table, so
-  case-insensitive search behaves the same regardless of server defaults.
+  case-insensitive search behaves the same regardless of server defaults. It is also
+  accent-insensitive, so a search for `jose` would match `José`.
+- **`CHECK` violations surface as generic errors.** Spring reports MySQL error 3819
+  (check constraint violated) as `UncategorizedSQLException`, not
+  `DataIntegrityViolationException`. That doesn't matter while employees are
+  read-only, but a future write path should validate before inserting.
 
 ## Migration plan
 
 | Migration | Increment | Contents |
 |-----------|-----------|----------|
 | `V1__create_app_user.sql` | 2: Authentication *(done)* | `app_user` |
-| `V2__create_employee_and_salary_record.sql` | 3: Employee schema | `employee`, `salary_record`, all indexes and constraints above |
+| `V2__create_employee.sql` | 3: Employee domain *(done)* | `employee` with its constraints and indexes |
+| `V3__create_salary_record.sql` | Salary history | `salary_record` with its constraints and index |
 
 Seed data is **not** a migration (see [architecture.md](architecture.md#seed-strategy)).
