@@ -79,6 +79,9 @@ automatically.
 | `GET` | `/api/employees/{id}/salary/history` | Bearer token | All salary records, newest first (`[]` if none) |
 | `POST` | `/api/employees/{id}/salary` | Bearer token | Add a salary record → `201` |
 | `PUT` | `/api/employees/{id}/salary/{salaryId}` | Bearer token | Correct a record's amount and currency |
+| `GET` | `/api/analytics/overview` | Bearer token | Current-salary statistics per currency |
+| `GET` | `/api/analytics/by-country` | Bearer token | Current-salary statistics per country and currency |
+| `GET` | `/api/analytics/by-department` | Bearer token | Current-salary statistics per department and currency |
 
 Employees are read-only. `/api/employees` takes these optional query parameters:
 
@@ -146,6 +149,42 @@ Rules:
 - There is at most one record per employee per date; a duplicate gets `409`.
 - Terminated employees can't get new records (`409`), but their records can be corrected.
 - Salary records are never deleted, and there is no currency conversion.
+
+### Analytics
+
+Statistics over **current salaries** (latest `effectiveDate` on or before today),
+excluding terminated employees. They are **always per currency**: amounts in different
+currencies are never combined, and there is no currency conversion.
+
+```bash
+curl -s localhost:8080/api/analytics/overview      -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8080/api/analytics/by-country    -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8080/api/analytics/by-department -H "Authorization: Bearer $TOKEN"
+```
+
+With the `dev` seed data, the overview begins:
+
+```json
+{
+  "generatedAt": "2026-09-20T08:30:00.123Z",
+  "asOfDate": "2026-09-20",
+  "currencies": [
+    { "currency": "AUD", "employeeCount": 915, "averageSalary": 139545.90, "medianSalary": 138000.00,
+      "minimumSalary": 69700.00, "maximumSalary": 229700.00 },
+    …
+  ]
+}
+```
+
+- `by-country` rows look like
+  `{ "country": "IN", "currency": "USD", "employeeCount": 33, "averageSalary": … }`.
+  India has separate INR and USD rows.
+- `by-department` rows have `department` instead of `country`.
+- Rows are ordered by group, then currency.
+- Average and median are rounded to 2 decimal places, half up. An even-sized group's
+  median is the mean of the two middle values.
+- If no one has a current salary, the results are empty (`"currencies": []` or `[]`),
+  with `200`.
 
 Errors use RFC 9457 Problem Details (`application/problem+json`):
 

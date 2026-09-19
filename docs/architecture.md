@@ -114,7 +114,8 @@ com.acme.salary
 ├── salary/      SalaryController, SalaryService, SalaryRecordRepository, SalaryRecord entity,
 │                SalaryRecordNotFoundException, dto/ (SalaryRecordResponse, CreateSalaryRequest,
 │                CorrectSalaryRequest)
-├── analytics/   (planned) AnalyticsController, AnalyticsService, AnalyticsRepository (native queries), dto/
+├── analytics/   AnalyticsController, AnalyticsService, SalaryStatisticsRepository (native SQL via
+│                JdbcTemplate), dto/ (AnalyticsOverviewResponse, Currency/Country/DepartmentSalaryStatistics)
 ├── seed/        EmployeeSeedGenerator, SalarySeedGenerator (deterministic), SeedDataLoader (dev only)
 └── common/
     ├── security/    SecurityConfig (filter chain, BCrypt, JWT encoder/decoder), JwtProperties,
@@ -244,12 +245,76 @@ are never added together or averaged together.**
   and it shows HR where pay practices diverge.
 - Metrics per group: headcount, min, max, average and median of **current salary**, for
   employees who are not `TERMINATED`.
-- Current salaries are selected in SQL with a window function
-  (`ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC)`).
-  MySQL has no median function. The service computes medians from the current-salary
-  rows, which is at most 10,000 small rows per request.
+- There are no exchange-rate APIs, conversion tables or hard-coded rates.
 - If exchange rates are added later, a converted "reporting currency" view can sit
   next to the per-currency figures without changing the data model.
+
+## Analytics API
+
+All endpoints require the `HR_MANAGER` role. They are read-only, not paginated and have
+no filters.
+
+| Endpoint | Returns (always `200`) |
+|----------|------------------------|
+| `GET /api/analytics/overview` | `{ generatedAt, asOfDate, currencies: [ CurrencySalaryStatistics ] }`, one entry per currency, ordered by currency code |
+| `GET /api/analytics/by-country` | `[ CountrySalaryStatistics ]`, one row per `(country, currency)`, ordered by country then currency |
+| `GET /api/analytics/by-department` | `[ DepartmentSalaryStatistics ]`, one row per `(department, currency)`, ordered by department then currency |
+
+Each statistics row has `currency`, `employeeCount`, `averageSalary`, `medianSalary`,
+`minimumSalary` and `maximumSalary`, plus `country` or `department`. Amounts have two
+decimal places.
+
+- **Current salary** uses the same rule as `GET /api/employees/{id}/salary`: the record
+  with the latest `effective_date` on or before today.
+  - Future-dated records are ignored, and an older record never counts once a newer one
+    is in force.
+  - Employees with no salary, or only future-dated salaries, are not counted.
+- **"Today" is the UTC calendar date from the injected `Clock`.**
+  - A salary is current when `effective_date <= asOfDate`, where `asOfDate` is the UTC
+    date of `clock.instant()`. `generatedAt` comes from the same instant.
+  - The salary API uses the same `Clock`, so an employee's current salary is the same in
+    both.
+  - The overview returns `asOfDate` so consumers know which business date the statistics
+    represent. For example, from 00:00 to 05:30 in India (UTC+5:30) it is still the
+    previous UTC date.
+  - There is deliberately no time-zone configuration and no per-user local time zone.
+- **Terminated employees are excluded.** Analytics count only employees whose
+  `employment_status` is not `TERMINATED`, following the approved product requirement
+  that compensation analytics reflect the current workforce. `ON_LEAVE` employees are
+  still employed and are included. `ACTIVE` employees are, of course, included.
+- **Empty results.** If no one has a current salary, `currencies` is `[]` and the other
+  endpoints return `[]`, with `200`. There are no zero-valued statistics and no `404`.
+- **Database-side aggregation.** Each request runs **one** native SQL query
+  (`SalaryStatisticsRepository`). Salary history is never loaded into Java and there is
+  no per-employee query.
+  - A `ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC)` over
+    records with `effective_date <= :today` picks exactly one current salary per
+    employee. The unique `(employee_id, effective_date)` constraint rules out ties.
+  - The query then joins `employee` for status, country and department, and groups by
+    `(currency)`, `(country, currency)` or `(department, currency)`.
+  - Native SQL is needed because JPQL has no window functions. The three endpoints share
+    one SQL template and differ only in the grouping column, which comes from an enum,
+    never from request input.
+  - The per-employee salary endpoint keeps its own single-row query. The two queries
+    implement the same rule in different shapes, and `AnalyticsIT` checks that they agree.
+- **Median.** MySQL has no `MEDIAN`, so a second window function numbers each group's
+  salaries by amount (`ROW_NUMBER() … ORDER BY amount`, with `COUNT(*) OVER` for the group
+  size). The median is `AVG` of positions `(n+1) DIV 2` and `(n+2) DIV 2`: the middle
+  value for odd `n`, the mean of the two middle values for even `n`. For example,
+  [100, 200, 300] gives 200 and [100, 200, 300, 400] gives 250. It is computed
+  independently for every group.
+- **Precision.** MySQL returns exact `DECIMAL` sums, minimums, maximums and medians, and
+  Java uses `BigDecimal` throughout (no `float` or `double`).
+  - `averageSalary = SUM / COUNT` and `medianSalary` are each rounded **once**, to 2
+    decimal places with `RoundingMode.HALF_UP`, in `AnalyticsService`. For example,
+    100.015 becomes 100.02.
+  - Minimum and maximum are stored amounts and need no rounding.
+- **Demo data.** The `dev` seed (10,000 employees, about 24,901 salary records) spans
+  7 currencies, 8 countries (each non-US country also has some USD-paid employees),
+  9 departments, future-dated raises and terminated employees. The analytics therefore
+  show meaningful, currency-separated figures as soon as the app starts. The seed was
+  not changed for this step. Edge cases the seed doesn't cover (no salary, future-only
+  salary) are tested with fixtures.
 
 ## Employee API
 
@@ -343,6 +408,18 @@ and count all happen in MySQL. Measured plans are in [performance.md](performanc
   Docker in WSL2). Without one they fail with "Could not find a valid Docker
   environment". They fail rather than skip silently, so a green build always means the
   integration tests actually ran.
+- **Test counts (after Step 5).** The two suites are separate, so their counts don't
+  add up to one another:
+
+  | Suite | Command | Tests | Made up of |
+  |-------|---------|------:|------------|
+  | Unit and web-slice (`*Test`) | `.\mvnw.cmd test` (no Docker) | 173 | 152 existing + 21 new analytics tests |
+  | Integration (`*IT`) | `.\mvnw.cmd verify` (Docker) | 53 | 38 existing + 15 new analytics tests |
+
+  Docker is not available on the development machine. So the 53 integration tests were
+  verified against a throwaway MySQL 8.0 instance, using a scratch copy of the backend in
+  which only `TestcontainersConfiguration` is replaced. No integration test is skipped or
+  disabled in the repository.
 
 ## Seed strategy
 
@@ -427,7 +504,7 @@ Each increment is independently reviewable and committable.
 2. **Authentication**: `app_user` migration, BCrypt, initial-user bootstrap, login endpoint, JWT issuing and validation, 401/403 handling, and the global `ProblemDetail` error handler. *(done)*
 3. **Employee domain**: `employee` migration, deterministic 10k seed, read-only list API (search, filters, pagination) and employee detail. *(done)*
 4. **Salary history API**: `salary_record` migration and seeded histories; record a salary change, correct a record, list history, current salary. *(done)*
-5. **Analytics API**: per-currency aggregates overall, by country and by department.
+5. **Analytics API**: per-currency aggregates overall, by country and by department. *(done)*
 6. **Angular foundation**: project setup, login page, auth interceptor and route guard.
 7. **Employee list UI**: Material table with server-side pagination, search and filters, plus the filter-options endpoint.
 8. **Employee detail and salary history UI**: history table, add-salary and correct-salary forms.
@@ -440,6 +517,9 @@ Each increment is independently reviewable and committable.
 | How is the first HR Manager created? | From environment variables at startup, BCrypt-hashed. Never committed. |
 | Which salary is "current"? | The latest `effective_date` on or before today. Future-dated changes are supported. |
 | How are multiple currencies aggregated? | Separately per currency. There is no conversion. |
+| Where are analytics computed? | In MySQL, with one query per request. Java only rounds the average and median (2 dp, `HALF_UP`). |
+| Do analytics count terminated employees? | No, as the requirements specify. `ON_LEAVE` employees are counted. |
+| Does analytics need a new index? | No. Measured; see [performance.md](performance.md#analytics-queries). |
 | Can employees be created or edited? | No. Employees are read-only in v1. |
 | How is a mistaken salary entry corrected? | By updating that record's amount and currency. There is one record per employee per effective date, and no superseding records. |
 | Is there an audit log? | Not in v1. `salary_record.created_at` records when a row was added; corrections don't keep previous values. |

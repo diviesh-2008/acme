@@ -106,11 +106,24 @@ salary changes over time, and see how compensation is distributed.
 
 ### 7. Compensation analytics
 
-- Analytics use each employee's current salary and exclude `TERMINATED` employees.
+- Analytics use each employee's **current salary**: the record with the latest effective
+  date on or before today. Future-dated and superseded records are ignored. Employees
+  with no current salary, and `TERMINATED` employees, are not counted.
 - **Every figure is calculated separately per currency.** Amounts in different
-  currencies are never added together or averaged together.
-- For each currency: headcount, minimum, maximum, average and median salary.
-- Breakdowns by **country** and by **department**, each shown per currency.
+  currencies are never added together or averaged together, and nothing is converted.
+- For each currency: headcount, minimum, maximum, average and median salary. Average
+  and median are rounded to 2 decimal places, half up. For an even count, the median is
+  the mean of the two middle values.
+- Three views, all for the HR Manager only:
+  - overview per currency (`GET /api/analytics/overview`)
+  - per **country** and currency (`GET /api/analytics/by-country`)
+  - per **department** and currency (`GET /api/analytics/by-department`)
+
+  A country or department with employees paid in two currencies has two rows.
+- If no one has a current salary, the views return empty results with `200`, not zeros
+  or `404`.
+- Filtering, date ranges, exports and charts are not part of the analytics API. Charts
+  belong to the UI.
 
 ### 8. Seed data
 

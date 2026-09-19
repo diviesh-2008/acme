@@ -1,7 +1,7 @@
 # Performance
 
-How the employee API stays fast at ACME's size (~10,000 employees), what was measured,
-and where the limits are. There is deliberately no caching, search engine or read replica.
+How the employee, salary and analytics APIs stay fast at ACME's size (~10,000
+employees), what was measured, and where the limits are. There is deliberately no caching, search engine or read replica.
 A well-indexed MySQL table with paging in the database is enough at this scale.
 
 ## Principles
@@ -118,6 +118,57 @@ Every salary query is scoped to one employee and uses the unique
 - An employee has at most a handful of salary records (1–5 in the seed), so returning the
   full history unpaged is fine.
 - The seed inserts 24,901 salary records in about 2–3 seconds (JDBC batches of 1,000).
+
+## Analytics queries
+
+Each analytics request runs **one** SQL statement (see
+[database-design.md](database-design.md#key-queries)). MySQL computes counts, sums,
+minimums, maximums and medians. The application receives one row per group (7 rows for
+the overview, 15 by country and 63 by department on the seed), never salary history.
+
+`EXPLAIN ANALYZE` of the by-country query on MySQL 8.0.46, with 10,000 employees and
+24,901 salary records:
+
+| Step | Rows | Cumulative time |
+|------|-----:|----------------:|
+| Table scan of `salary_record`, filter `effective_date <= today` | 24,901 → 24,414 | 11 ms |
+| Sort by `employee_id, effective_date DESC`; `ROW_NUMBER()` picks the current salary | 24,414 → 10,000 | 34 ms |
+| Primary-key lookup of each employee; drop `TERMINATED` | 10,000 → 9,377 | 56 ms |
+| Sort by `country, currency, amount`; `ROW_NUMBER()` / `COUNT(*) OVER` for median positions | 9,377 | 110 ms |
+| Group into `(country, currency)` rows and sort | 15 | 133 ms |
+
+These are `EXPLAIN ANALYZE` times, which include instrumentation overhead. Measured over
+HTTP (warm, median of 15 calls, including JWT validation and JSON), each endpoint takes
+about **150–190 ms** on a developer laptop.
+
+**The results were checked independently.** An independent query found current salaries
+with a `MAX(effective_date)` join instead of a window function, and computed medians with
+`ORDER BY … LIMIT` per currency. It matched the overview exactly for all 7 currencies:
+count, average, minimum, maximum and median.
+
+**Index decision: no new index.** The existing unique `(employee_id, effective_date)` index
+is not used by this query, because the query needs `amount` and `currency` for every
+employee. Reading them through the secondary index would cost 24,901 extra lookups, so
+MySQL scans the table instead.
+
+- A covering index `(employee_id, effective_date, amount, currency)` was created on a
+  throwaway database and measured. MySQL used it but still sorted, because it does not
+  read the index backwards for the `DESC` window.
+- Overview latency did not improve: a median of 164 ms with the index against 153 ms
+  without, which is within noise.
+- The index would add write cost and storage for no gain, so it was dropped and is not
+  in any migration.
+
+**Trade-offs and limits.**
+- The query cost grows linearly with salary history: one scan plus two sorts. That is
+  fine at 10,000 employees and about 25,000 records, but analytics is not a
+  sub-10-millisecond endpoint.
+- If it ever needs to be faster, the next steps, in order, would be:
+  1. cache the result for a short time, since the figures change only when salaries are
+     added or a date passes;
+  2. materialize current salaries on write.
+
+  Neither is needed or implemented now.
 
 ## Why this is appropriate for 10,000 employees
 

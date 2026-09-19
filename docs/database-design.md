@@ -107,7 +107,7 @@ checked with `EXPLAIN ANALYZE` against the 10,000-row seed (see
 | `idx_employee_name` | `employee(last_name, first_name)` | The default list order `last_name, first_name, id`. InnoDB appends the primary key to every secondary index, so this is effectively `(last_name, first_name, id)`, and a page is read in index order with no sort step. Search and status-filtered lists also walk this index and stop once the page is full. |
 | `idx_employee_country_name` | `employee(country_code, last_name, first_name)` | Country filter, returned in list order without a sort. The leading column also serves plain country lookups and per-country analytics later. |
 | `idx_employee_department_name` | `employee(department, last_name, first_name)` | Department filter, as above. |
-| `uk_salary_record_employee_date` | `salary_record(employee_id, effective_date)` | Every salary query: current salary (reverse range scan, 1 row), history (reverse index lookup, no sort), the duplicate-date check, and later `PARTITION BY employee_id ORDER BY effective_date` in analytics. It also serves as the foreign-key index. |
+| `uk_salary_record_employee_date` | `salary_record(employee_id, effective_date)` | Every per-employee salary query: current salary (reverse range scan, 1 row), history (reverse index lookup, no sort) and the duplicate-date check. It also serves as the foreign-key index. The analytics query reads all current salaries, so it scans the table instead; a covering index was measured and did not help (see [performance.md](performance.md#analytics-queries)). |
 | `uk_app_user_email` | `app_user(email)` | Login |
 
 **Why `salary_record` has no other index.** Both an `employee_id` index and an
@@ -195,23 +195,36 @@ For example, with records dated 2025-01-01 (800,000), 2026-01-01 (900,000) and
 SELECT … FROM salary_record WHERE employee_id = :employeeId ORDER BY effective_date DESC;
 ```
 
-**Current salaries for analytics** (planned; one pass over salary history, grouped per currency):
+**Compensation analytics** (`SalaryStatisticsRepository`; one query per request). This
+is the by-country form. The overview drops `e.country_code`, and by-department uses
+`e.department`:
 
 ```sql
-WITH current_salary AS (
-    SELECT employee_id, amount, currency,
-           ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) AS rn
-    FROM salary_record
-    WHERE effective_date <= :today
+WITH current_salary AS (           -- one current salary per employee
+    SELECT s.employee_id, s.amount, s.currency,
+           ROW_NUMBER() OVER (PARTITION BY s.employee_id ORDER BY s.effective_date DESC) AS recency
+    FROM salary_record s
+    WHERE s.effective_date <= :today
+),
+ranked AS (                        -- position of each salary within its group, for the median
+    SELECT e.country_code AS dimension, cs.currency, cs.amount,
+           ROW_NUMBER() OVER (PARTITION BY e.country_code, cs.currency ORDER BY cs.amount) AS position,
+           COUNT(*)     OVER (PARTITION BY e.country_code, cs.currency) AS group_size
+    FROM current_salary cs
+    JOIN employee e ON e.id = cs.employee_id
+    WHERE cs.recency = 1
+      AND e.employment_status <> 'TERMINATED'
 )
-SELECT e.country_code, cs.currency,
-       COUNT(*) AS headcount, MIN(cs.amount), MAX(cs.amount), AVG(cs.amount)
-FROM current_salary cs
-JOIN employee e ON e.id = cs.employee_id
-WHERE cs.rn = 1
-  AND e.employment_status <> 'TERMINATED'
-GROUP BY e.country_code, cs.currency;
+SELECT dimension, currency, COUNT(*), SUM(amount), MIN(amount), MAX(amount),
+       AVG(CASE WHEN position IN ((group_size + 1) DIV 2, (group_size + 2) DIV 2)
+                THEN amount END) AS median
+FROM ranked
+GROUP BY dimension, currency
+ORDER BY dimension, currency;
 ```
+
+Every group has exactly one currency, so no aggregate ever mixes currencies. The average
+(`SUM / COUNT`) and the median are rounded to 2 decimal places in Java, half up.
 
 `:today` is always passed in from the application's `Clock`, never `CURRENT_DATE`, so
 the result doesn't depend on the database server's time zone and tests can fix the date.
