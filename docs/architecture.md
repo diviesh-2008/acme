@@ -58,26 +58,41 @@ Browser (Angular)                 Spring Boot                                MyS
 
 - **Issuing tokens.** `POST /api/auth/login` authenticates through Spring Security's
   `AuthenticationManager`, which uses a `UserDetailsService` over `app_user` and a
-  `BCryptPasswordEncoder`. On success, a `JwtEncoder` signs a token with `sub` = email,
-  a `roles` claim of `HR_MANAGER`, `iat` and `exp` (1 hour).
-- **Validating tokens.** Every other `/api/**` request is checked by Spring Security's
-  OAuth2 Resource Server support (Nimbus `JwtDecoder`). It verifies the signature and
-  expiry and maps the `roles` claim to `ROLE_HR_MANAGER`. We write no JWT filter and
-  add no third-party JWT library.
-- **Signing key.** HS256 with a secret of at least 256 bits from `JWT_SECRET`. The
-  application fails to start without it. A single service issues and verifies its own
-  tokens, so asymmetric keys would add key management for no benefit.
+  `BCryptPasswordEncoder`. On success, a `JwtEncoder` signs a token with `iss`,
+  `sub` = email, a single `role` claim (`HR_MANAGER`, mirroring `app_user.role`),
+  `iat` and `exp` (1 hour).
+- **Validating tokens.** Every other request is checked by Spring Security's
+  OAuth2 Resource Server support (Nimbus `JwtDecoder`). It verifies the signature,
+  expiry and issuer and maps the `role` claim to `ROLE_HR_MANAGER`. We write no JWT
+  filter. Nimbus JOSE+JWT is already Spring Security's JWT engine and its version is
+  managed by Spring Boot, so no separate JWT library is added.
+- **Signing key.** HS256 with a secret of at least 32 bytes (256 bits) from
+  `ACME_JWT_SECRET`. The application fails to start if it is missing or too short, and
+  the error message never includes the secret. A single service issues and verifies its
+  own tokens, so asymmetric keys would add key management for no benefit.
+- **Long passwords.** BCrypt accepts at most 72 bytes, and Spring Security rejects
+  longer input with an exception. A longer login password can never match, so it is
+  rejected as bad credentials (`401`) rather than causing a `500`.
 - **Status codes.** A bad login returns `401` with a generic message, so attackers
   cannot tell which emails exist. A missing, invalid or expired token returns `401`
-  with `WWW-Authenticate: Bearer`, and a missing role returns `403`. Both bodies are
-  `ProblemDetail`, produced by a custom `AuthenticationEntryPoint` and `AccessDeniedHandler`.
+  with `WWW-Authenticate: Bearer`, and a missing role returns `403`. The security
+  filters hand these failures to the same `GlobalExceptionHandler` as the rest of the
+  API (via `SecurityProblemHandler`), so every error body is the same `ProblemDetail` shape.
 - **Stateless.** No HTTP session is created. CSRF protection is disabled because
   authentication uses a header, not cookies, so the browser never attaches credentials
   automatically.
-- **Initial account.** On startup, if `HR_MANAGER_EMAIL` and `HR_MANAGER_PASSWORD` are
-  set and no user with that email exists, one `HR_MANAGER` user is created with a BCrypt
-  hash. If the variables are missing, a warning is logged and nothing is created.
-  Credentials never appear in source control.
+- **Initial account.** On startup, if `ACME_INITIAL_HR_EMAIL` and
+  `ACME_INITIAL_HR_PASSWORD` are set and no user with that email exists, one
+  `HR_MANAGER` user is created with a BCrypt hash. The email is stored in lower case.
+  - An existing account is left unchanged, including its password, so this is safe on
+    every startup.
+  - If neither variable is set, a warning is logged and nothing is created.
+  - If only one is set, or the password is shorter than 12 characters or longer than
+    72 bytes, startup fails.
+  - It runs synchronously (`SmartInitializingSingleton`) after the schema is migrated but
+    *before* the web server accepts requests. The account therefore always exists before
+    the first login.
+  - Credentials never appear in source control.
 - **Angular side.** The token is kept in `sessionStorage`, so it survives a page reload
   and is cleared when the tab closes. An HTTP interceptor adds the `Authorization`
   header. A route guard blocks unauthenticated navigation. Any `401` clears the token
@@ -92,12 +107,17 @@ Code is organized by feature, with layers inside each feature:
 
 ```
 com.acme.salary
-├── auth/        login controller, token service, AppUser entity + repository, initial-user bootstrap
+├── auth/        AuthController, AuthService, JwtTokenService, AppUser entity + repository,
+│                AppUserDetailsService, InitialHrManagerInitializer, dto/
 ├── employee/    EmployeeController, EmployeeService, EmployeeRepository, Employee entity, dto/
 ├── salary/      SalaryController, SalaryService, SalaryRecordRepository, SalaryRecord entity, dto/
 ├── analytics/   AnalyticsController, AnalyticsService, AnalyticsRepository (native queries), dto/
 ├── seed/        deterministic seed-data generator and loader (dev only)
-└── common/      SecurityConfig, GlobalExceptionHandler, PageResponse, shared exceptions
+└── common/
+    ├── security/  SecurityConfig (filter chain, BCrypt, JWT encoder/decoder), JwtProperties,
+    │              SecurityProblemHandler (401/403 → GlobalExceptionHandler)
+    ├── error/     GlobalExceptionHandler
+    └── ClockConfig, PageResponse (with the employee query API)
 ```
 
 Keeping a feature's controller, service and repository together makes each increment
@@ -249,10 +269,10 @@ are never added together or averaged together.**
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DB_URL` | `jdbc:mysql://localhost:3306/acme_salary` | Application database |
-| `DB_USERNAME` / `DB_PASSWORD` | `acme` / `acme` | Local development credentials only |
-| `JWT_SECRET` | *none; required* | HS256 signing key (≥ 32 bytes) |
-| `HR_MANAGER_EMAIL` / `HR_MANAGER_PASSWORD` | *none* | Creates the initial HR Manager account |
+| `ACME_DB_URL` | `jdbc:mysql://localhost:3306/acme_salary` | Application database |
+| `ACME_DB_USERNAME` / `ACME_DB_PASSWORD` | *none* | Database credentials |
+| `ACME_JWT_SECRET` | *none; required* | HS256 signing key (≥ 32 bytes) |
+| `ACME_INITIAL_HR_EMAIL` / `ACME_INITIAL_HR_PASSWORD` | *none* | Creates the initial HR Manager account if absent (password 12 characters to 72 bytes) |
 
 Nothing that is secret in a shared environment is committed.
 
@@ -260,17 +280,16 @@ Nothing that is secret in a shared environment is committed.
 
 Each increment is independently reviewable and committable.
 
-1. **Project foundation**: Spring Boot project, configuration, test infrastructure, docs. *(this step)*
-2. **Error handling**: global `ProblemDetail` handler and `PageResponse` DTO.
-3. **Authentication**: `app_user` migration, BCrypt, initial-user bootstrap, login endpoint, JWT issuing and validation, 401/403 handling.
-4. **Employee schema and seed data**: `employee` + `salary_record` migrations and the deterministic 10k seed.
-5. **Employee query API**: pagination, search, filters, filter options, employee detail.
-6. **Salary history API**: record a salary change, correct a record, list history, current salary.
-7. **Analytics API**: per-currency aggregates overall, by country and by department.
-8. **Angular foundation**: project setup, login page, auth interceptor and route guard.
-9. **Employee list UI**: Material table with server-side pagination, search and filters.
-10. **Employee detail and salary history UI**: history table, add-salary and correct-salary forms.
-11. **Analytics UI**.
+1. **Project foundation**: Spring Boot project, configuration, test infrastructure, docs. *(done)*
+2. **Authentication**: `app_user` migration, BCrypt, initial-user bootstrap, login endpoint, JWT issuing and validation, 401/403 handling, and the global `ProblemDetail` error handler. *(done)*
+3. **Employee schema and seed data**: `employee` + `salary_record` migrations and the deterministic 10k seed.
+4. **Employee query API**: `PageResponse` DTO, pagination, search, filters, filter options, employee detail.
+5. **Salary history API**: record a salary change, correct a record, list history, current salary.
+6. **Analytics API**: per-currency aggregates overall, by country and by department.
+7. **Angular foundation**: project setup, login page, auth interceptor and route guard.
+8. **Employee list UI**: Material table with server-side pagination, search and filters.
+9. **Employee detail and salary history UI**: history table, add-salary and correct-salary forms.
+10. **Analytics UI**.
 
 ## Resolved decisions
 

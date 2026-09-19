@@ -169,7 +169,7 @@ the result doesn't depend on the database server's time zone and tests can fix t
 
 | Migration | Increment | Contents |
 |-----------|-----------|----------|
-| `V1__create_app_user.sql` | 3: Authentication | `app_user` |
-| `V2__create_employee_and_salary_record.sql` | 4: Employee schema | `employee`, `salary_record`, all indexes and constraints above |
+| `V1__create_app_user.sql` | 2: Authentication *(done)* | `app_user` |
+| `V2__create_employee_and_salary_record.sql` | 3: Employee schema | `employee`, `salary_record`, all indexes and constraints above |
 
 Seed data is **not** a migration (see [architecture.md](architecture.md#seed-strategy)).

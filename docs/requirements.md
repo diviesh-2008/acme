@@ -22,8 +22,9 @@ salary changes over time, and see how compensation is distributed.
 - An HR Manager signs in with an email address and password.
 - Passwords are stored only as BCrypt hashes. Plain-text passwords are never stored or logged.
 - There is no self-registration. The initial HR Manager account is created at startup
-  from environment variables (`HR_MANAGER_EMAIL`, `HR_MANAGER_PASSWORD`). No credentials
-  or password hashes are committed to source control.
+  from environment variables (`ACME_INITIAL_HR_EMAIL`, `ACME_INITIAL_HR_PASSWORD`), only
+  if it does not already exist. No credentials or password hashes are committed to
+  source control.
 - A failed login returns `401 Unauthorized` with the same message whether the email or
   the password was wrong, so attackers cannot discover which emails exist.
 
@@ -33,8 +34,8 @@ salary changes over time, and see how compensation is distributed.
 - All employee, salary and analytics APIs require a valid token and the `HR_MANAGER` role.
 - A missing, invalid or expired token returns `401 Unauthorized`. A valid token without
   the required role returns `403 Forbidden`.
-- The signing secret comes from an environment variable. The application refuses to
-  start without one.
+- The signing secret comes from the `ACME_JWT_SECRET` environment variable. The
+  application refuses to start without one.
 
 ### 3. Employee search, filtering and pagination
 

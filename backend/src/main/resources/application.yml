@@ -2,12 +2,11 @@ spring:
   application:
     name: salary-management
 
-  # Defaults target a local development database (see db/local-setup.sql).
-  # Override with environment variables in any shared or deployed environment.
+  # Credentials come only from the environment (see db/local-setup.sql for local setup).
   datasource:
-    url: ${DB_URL:jdbc:mysql://localhost:3306/acme_salary}
-    username: ${DB_USERNAME:acme}
-    password: ${DB_PASSWORD:acme}
+    url: ${ACME_DB_URL:jdbc:mysql://localhost:3306/acme_salary}
+    username: ${ACME_DB_USERNAME:}
+    password: ${ACME_DB_PASSWORD:}
 
   jpa:
     # Keep persistence inside the service layer; no lazy loading during view rendering.
@@ -26,3 +25,16 @@ spring:
 server:
   error:
     include-stacktrace: never
+
+acme:
+  security:
+    jwt:
+      # Required, no default. At least 32 bytes, e.g. generated with `openssl rand -base64 48`.
+      secret: ${ACME_JWT_SECRET:}
+      ttl: 1h
+      issuer: acme-salary-management
+
+  # Optional. On startup, creates this HR Manager account if it does not exist yet.
+  initial-hr:
+    email: ${ACME_INITIAL_HR_EMAIL:}
+    password: ${ACME_INITIAL_HR_PASSWORD:}
