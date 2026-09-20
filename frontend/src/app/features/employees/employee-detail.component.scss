@@ -1,0 +1,36 @@
+.back {
+  margin: 0 0 12px -8px;
+}
+
+.details {
+  display: grid;
+  grid-template-columns: minmax(140px, max-content) 1fr;
+  gap: 14px 32px;
+  margin: 8px 0;
+
+  @media (max-width: 600px) {
+    grid-template-columns: 1fr;
+    gap: 2px;
+
+    dd {
+      margin-bottom: 12px;
+    }
+  }
+}
+
+dt {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+dd {
+  margin: 0;
+
+  a {
+    color: var(--mat-sys-primary);
+  }
+}
+
+.read-only-note {
+  font: var(--mat-sys-body-small);
+  margin-top: 12px;
+}

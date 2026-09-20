@@ -4,7 +4,7 @@ A web application that lets an HR Manager manage employee salary information and
 understand compensation across ACME's ~10,000 employees.
 
 - `backend/`: Spring Boot 4 REST API (Java 21, Spring Security, Spring Data JPA, MySQL, Flyway)
-- `frontend/`: Angular + Angular Material (coming in a later increment)
+- `frontend/`: Angular 19 + Angular Material HR Manager app (see [Frontend](#frontend))
 - `docs/requirements.md`: scope, what is excluded and why
 - `docs/architecture.md`: architecture and design decisions
 - `docs/database-design.md`: tables, relationships, constraints and indexes
@@ -16,6 +16,7 @@ understand compensation across ACME's ~10,000 employees.
 - MySQL 8 on `localhost:3306`, to run the application
 - Docker (Docker Desktop, or Docker in WSL2), to run the integration tests
 - Maven is **not** required. Use the included wrapper (`mvnw` / `mvnw.cmd`).
+- Node.js 20.11+ (or 22+) and npm, for the frontend. Chrome is needed for the frontend tests.
 
 ## Local database setup (one time)
 
@@ -205,6 +206,78 @@ cd backend
 
 Integration tests start a throwaway `mysql:8.4` container automatically and load the
 demo seed into it. No local database or user setup is required.
+
+## Frontend
+
+`frontend/` is an **Angular 19.2** application built with standalone components, signals,
+strict TypeScript and **Angular Material 19**. It is the HR Manager's user interface for
+everything the API offers.
+
+### Setup and running
+
+Start the backend first (see [Running the backend](#running-the-backend)). It must be on
+port 8080. Then:
+
+```bash
+cd frontend
+npm install
+npm start          # ng serve on http://localhost:4200
+```
+
+The development server **proxies `/api` to `http://localhost:8080`** (`proxy.conf.json`).
+The browser therefore only talks to one origin, and the backend needs no CORS
+configuration. The API base path `/api` is configured in one place,
+`src/environments/environment.ts`. To use a backend on another port, change the `target`
+in `proxy.conf.json`.
+
+Sign in with the `ACME_INITIAL_HR_EMAIL` / `ACME_INITIAL_HR_PASSWORD` account.
+
+### Routes
+
+| Route | Page |
+|-------|------|
+| `/login` | Sign in (the only public page) |
+| `/dashboard` | Per-currency compensation summary, as of the backend's UTC date |
+| `/employees` | Employee directory with server-side paging, debounced search and filters |
+| `/employees/:id` | Read-only employee details |
+| `/employees/:id/salary` | Current salary, salary history (Current/Future/Past), add and correct salary |
+| `/analytics` | Overview, by-country and by-department statistics, each per currency |
+
+All routes except `/login` require a signed-in HR Manager. Unknown paths go to `/dashboard`.
+
+### Authentication
+
+- The login form posts to `POST /api/auth/login`. The returned access token and its
+  `expiresAt` are kept in **`sessionStorage`**; the password is never stored.
+- An HTTP interceptor adds `Authorization: Bearer <token>` to `/api` requests, except
+  login.
+- A route guard sends signed-out users to `/login` and returns them to the page they
+  asked for afterwards.
+- On any `401` from the backend, the session is cleared and the user returns to `/login`
+  with "Your session has expired. Please sign in again."
+- The JWT is never decoded in the browser. The backend decides every request.
+- **Why `sessionStorage`:** the token survives a page reload but not closing the tab or
+  browser, so it is not kept on a shared machine.
+  - The trade-off is that scripts on the page can read it, so a cross-site-scripting
+    flaw could steal it for its 1-hour lifetime. Angular's automatic output escaping and
+    the short lifetime limit that risk.
+  - An `HttpOnly` cookie would hide the token from scripts, but it needs backend changes
+    and CSRF protection.
+  - There are no refresh tokens (the backend has none); users sign in again after
+    expiry.
+
+### Tests and build
+
+```bash
+cd frontend
+npm test           # unit and component tests, once, in headless Chrome (Karma + Jasmine)
+npm run test:watch # the same, re-running on change
+npm run lint       # Angular ESLint, including template accessibility rules
+npm run build      # production build into frontend/dist/frontend/browser
+```
+
+The production build is a static site. Serve `dist/frontend/browser` from the same origin
+as the API (or behind the same reverse proxy), routing unknown paths to `index.html`.
 
 ## Configuration
 

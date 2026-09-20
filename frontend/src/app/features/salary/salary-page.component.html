@@ -1,0 +1,99 @@
+<div class="page">
+  <a mat-button [routerLink]="['/employees', employeeId()]" class="back"><mat-icon>arrow_back</mat-icon>Employee</a>
+
+  @if (loading() && employee() === null) {
+    <mat-progress-bar mode="indeterminate" aria-label="Loading salary" />
+  } @else if (error()) {
+    <app-state-message tone="error" icon="cloud_off" title="Could not load salary information" [message]="error()"
+                       actionLabel="Try again" (action)="load()" />
+  } @else {
+    @if (employee(); as person) {
+      <header class="page-header">
+        <div>
+          <h1>Salary · {{ person.firstName }} {{ person.lastName }}</h1>
+          <p class="subtitle">
+            {{ person.employeeCode }} · {{ person.jobTitle }} ·
+            <span [class]="'status status-' + person.employmentStatus.toLowerCase()">
+              {{ person.employmentStatus | employmentStatus }}
+            </span>
+          </p>
+        </div>
+        <span [matTooltip]="terminated() ? 'New salary records cannot be added for terminated employees.' : ''">
+          <button mat-flat-button type="button" (click)="addSalary()" [disabled]="terminated()">
+            <mat-icon>add</mat-icon>
+            Add salary
+          </button>
+        </span>
+      </header>
+
+      @if (loading()) {
+        <mat-progress-bar mode="indeterminate" aria-label="Refreshing salary" />
+      }
+
+      <mat-card appearance="outlined" class="current-card">
+        <mat-card-header>
+          <mat-card-title>Current salary</mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          @if (current(); as salary) {
+            <div class="current-amount">{{ salary.amount | money: salary.currency }}</div>
+            <div class="current-meta">
+              <span class="status status-current">Current</span>
+              Effective since {{ salary.effectiveDate | businessDate }} · Annual, in {{ salary.currency }}
+            </div>
+          } @else {
+            <app-state-message icon="event_busy" title="No salary in effect"
+                               [message]="hasFutureRecords()
+                                 ? 'A future-dated salary is scheduled; it becomes current on its effective date.'
+                                 : 'No salary has been recorded for this employee yet.'" />
+          }
+        </mat-card-content>
+      </mat-card>
+
+      <section class="history" aria-labelledby="history-heading">
+        <h2 id="history-heading">Salary history</h2>
+        @if (rows().length === 0) {
+          <app-state-message icon="history" title="No salary history" message="Add a salary record to start the history." />
+        } @else {
+          <div class="table-scroll table-card">
+            <table mat-table [dataSource]="rows()" class="history-table">
+              <caption class="visually-hidden">Salary history, newest effective date first</caption>
+
+              <ng-container matColumnDef="effectiveDate">
+                <th mat-header-cell *matHeaderCellDef scope="col">Effective date</th>
+                <td mat-cell *matCellDef="let row">{{ row.record.effectiveDate | businessDate }}</td>
+              </ng-container>
+
+              <ng-container matColumnDef="amount">
+                <th mat-header-cell *matHeaderCellDef scope="col" class="numeric">Annual amount</th>
+                <td mat-cell *matCellDef="let row" class="numeric">{{ row.record.amount | money: row.record.currency }}</td>
+              </ng-container>
+
+              <ng-container matColumnDef="status">
+                <th mat-header-cell *matHeaderCellDef scope="col">Status</th>
+                <td mat-cell *matCellDef="let row">
+                  <span [class]="'status status-' + row.status">{{ row.statusLabel }}</span>
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="actions">
+                <th mat-header-cell *matHeaderCellDef scope="col"><span class="visually-hidden">Actions</span></th>
+                <td mat-cell *matCellDef="let row" class="actions">
+                  <button mat-button type="button" (click)="correct(row.record)"
+                          [attr.aria-label]="'Correct the record effective ' + (row.record.effectiveDate | businessDate)">
+                    <mat-icon>edit</mat-icon>
+                    Correct
+                  </button>
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="columns"></tr>
+              <tr mat-row *matRowDef="let row; columns: columns" [class.current-row]="row.status === 'current'"></tr>
+            </table>
+          </div>
+          <p class="muted note">Salary records cannot be deleted. Correct a record to fix its amount or currency.</p>
+        }
+      </section>
+    }
+  }
+</div>

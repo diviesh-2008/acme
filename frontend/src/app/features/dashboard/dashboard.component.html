@@ -1,0 +1,73 @@
+<div class="page">
+  <header class="page-header">
+    <div>
+      <h1>Dashboard</h1>
+      @if (overview(); as data) {
+        <p class="subtitle as-of">Compensation figures as of {{ data.asOfDate | businessDate }} (UTC)</p>
+      } @else {
+        <p class="subtitle">Current compensation across ACME</p>
+      }
+    </div>
+    <div class="quick-links">
+      <a mat-stroked-button routerLink="/employees"><mat-icon>people</mat-icon>Employees</a>
+      <a mat-stroked-button routerLink="/analytics"><mat-icon>insights</mat-icon>Analytics</a>
+    </div>
+  </header>
+
+  @if (loading()) {
+    <mat-progress-bar mode="indeterminate" aria-label="Loading compensation overview" />
+  } @else if (error()) {
+    <app-state-message tone="error" icon="cloud_off" title="Could not load the overview"
+                       [message]="error()" actionLabel="Try again" (action)="load()" />
+  } @else {
+    @if (overview(); as data) {
+      @if (data.currencies.length === 0) {
+        <app-state-message icon="info" title="No current salaries yet"
+                           message="Once salaries are in effect, compensation figures appear here." />
+      } @else {
+        <section class="summary" aria-label="Summary">
+          <mat-card appearance="outlined" class="summary-card">
+            <mat-card-content>
+              <div class="summary-value">{{ employeesWithSalary() | count }}</div>
+              <div class="summary-label">Employees with a current salary</div>
+            </mat-card-content>
+          </mat-card>
+          <mat-card appearance="outlined" class="summary-card">
+            <mat-card-content>
+              <div class="summary-value">{{ data.currencies.length }}</div>
+              <div class="summary-label">Currencies paid</div>
+            </mat-card-content>
+          </mat-card>
+        </section>
+
+        <p class="note">
+          <mat-icon aria-hidden="true">info</mat-icon>
+          Figures are calculated separately for each currency. Amounts in different currencies are never combined.
+        </p>
+
+        <section class="currency-grid" aria-label="Compensation by currency">
+          @for (currency of data.currencies; track currency.currency) {
+            <mat-card appearance="outlined" class="currency-card">
+              <mat-card-header>
+                <mat-card-title>{{ currency.currency }}</mat-card-title>
+                <mat-card-subtitle>{{ currency.employeeCount | count }} employees</mat-card-subtitle>
+              </mat-card-header>
+              <mat-card-content>
+                <dl>
+                  <dt>Average</dt>
+                  <dd>{{ currency.averageSalary | money: currency.currency }}</dd>
+                  <dt>Median</dt>
+                  <dd>{{ currency.medianSalary | money: currency.currency }}</dd>
+                  <dt>Minimum</dt>
+                  <dd>{{ currency.minimumSalary | money: currency.currency }}</dd>
+                  <dt>Maximum</dt>
+                  <dd>{{ currency.maximumSalary | money: currency.currency }}</dd>
+                </dl>
+              </mat-card-content>
+            </mat-card>
+          }
+        </section>
+      }
+    }
+  }
+</div>

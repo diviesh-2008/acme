@@ -1,0 +1,60 @@
+.back {
+  margin: 0 0 12px -8px;
+}
+
+.current-card {
+  margin-bottom: 24px;
+}
+
+.current-amount {
+  font: var(--mat-sys-display-small);
+  color: var(--mat-sys-primary);
+  margin: 8px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.current-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.history h2 {
+  font: var(--mat-sys-title-medium);
+  margin: 0 0 12px;
+}
+
+.table-card {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 12px;
+  background: var(--mat-sys-surface);
+}
+
+.history-table {
+  width: 100%;
+  min-width: 520px;
+}
+
+.current-row {
+  background: color-mix(in srgb, var(--mat-sys-primary) 6%, transparent);
+}
+
+.actions {
+  text-align: right;
+}
+
+.note {
+  font: var(--mat-sys-body-small);
+  margin-top: 8px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

@@ -1,0 +1,50 @@
+<div class="page">
+  <a mat-button routerLink="/employees" class="back"><mat-icon>arrow_back</mat-icon>Employees</a>
+
+  @if (loading()) {
+    <mat-progress-bar mode="indeterminate" aria-label="Loading employee" />
+  } @else if (error()) {
+    <app-state-message tone="error" icon="person_off" [title]="error()!" />
+  } @else {
+    @if (employee(); as person) {
+      <header class="page-header">
+        <div>
+          <h1>{{ person.firstName }} {{ person.lastName }}</h1>
+          <p class="subtitle">{{ person.employeeCode }} · {{ person.jobTitle }}</p>
+        </div>
+        <a mat-flat-button [routerLink]="['/employees', person.id, 'salary']">
+          <mat-icon>payments</mat-icon>
+          View salary
+        </a>
+      </header>
+
+      <mat-card appearance="outlined">
+        <mat-card-content>
+          <dl class="details">
+            <dt>Employee code</dt>
+            <dd>{{ person.employeeCode }}</dd>
+            <dt>Name</dt>
+            <dd>{{ person.firstName }} {{ person.lastName }}</dd>
+            <dt>Email</dt>
+            <dd><a [href]="'mailto:' + person.email">{{ person.email }}</a></dd>
+            <dt>Job title</dt>
+            <dd>{{ person.jobTitle }}</dd>
+            <dt>Department</dt>
+            <dd>{{ person.department }}</dd>
+            <dt>Country</dt>
+            <dd>{{ person.countryCode | countryName }} ({{ person.countryCode }})</dd>
+            <dt>Employment status</dt>
+            <dd>
+              <span [class]="'status status-' + person.employmentStatus.toLowerCase()">
+                {{ person.employmentStatus | employmentStatus }}
+              </span>
+            </dd>
+            <dt>Hire date</dt>
+            <dd>{{ person.hireDate | businessDate }}</dd>
+          </dl>
+        </mat-card-content>
+      </mat-card>
+      <p class="read-only-note muted">Employee records are read-only in this application.</p>
+    }
+  }
+</div>

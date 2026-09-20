@@ -95,7 +95,8 @@ Browser (Angular)                 Spring Boot                                MyS
   - Credentials never appear in source control.
 - **Angular side.** The token is kept in `sessionStorage`, so it survives a page reload
   and is cleared when the tab closes. An HTTP interceptor adds the `Authorization`
-  header. A route guard blocks unauthenticated navigation. Any `401` clears the token
+  header to `/api` requests (never to login or other hosts). A route guard blocks
+  unauthenticated navigation and remembers the requested page. Any `401` clears the token
   and redirects to login. *Trade-off:* script-readable storage is exposed to XSS. This
   is mitigated by Angular's automatic output escaping and the short token lifetime. An
   HttpOnly cookie would remove that exposure but would bring back CSRF handling.
@@ -157,6 +158,59 @@ within a feature:
   field, instead of having it silently ignored.
 - **Time** comes from an injected `java.time.Clock` (UTC). "Today" drives the current
   salary and date validation, so tests can pin it.
+
+## Frontend structure
+
+Angular 19.2 with standalone components, signals, strict TypeScript and Angular Material 19.
+There is no state-management library; components hold their state in signals, and
+services own every HTTP call. Angular 19 was chosen because the development machine runs
+Node 20.18, which newer Angular versions do not support.
+
+```
+frontend/src/app
+├── core/
+│   ├── auth/           AuthService (sessionStorage token), authGuard / guestGuard, authInterceptor
+│   ├── api/            EmployeeService, SalaryService, AnalyticsService (the only code that calls HTTP)
+│   ├── models/         TypeScript interfaces mirroring the backend DTOs
+│   ├── http/           describeHttpError: status → safe user message (400/401/403/404/409/5xx/network)
+│   └── notifications/  NotificationService (Material snack bars)
+├── shared/             money, businessDate, count, countryName and employmentStatus pipes; empty/error state component
+├── layout/             ShellComponent: toolbar, responsive side navigation, user menu
+└── features/           login, dashboard, employees (list, detail), salary (page, add/correct dialog), analytics
+```
+
+- **Backend is the authority.**
+  - The UI never works out the current salary. The salary page labels history rows
+    relative to the record that `GET …/salary` returns: that record is CURRENT, later ones
+    are FUTURE, earlier ones PAST.
+  - The UI checks form formats only (amount > 0 with 2 decimals, a 3-letter currency, a
+    required date). The backend's business rules come back as `400`/`409` messages,
+    which appear next to the field or in the dialog.
+  - The Add salary button is disabled for terminated employees, as a convenience only.
+- **Server-side data only.**
+  - The employee list requests one page at a time (maximum 100).
+  - Search is debounced by 400 ms, and any search or filter change goes back to page 0.
+  - Rows keep the backend's order; there is no client-side sorting.
+- **Currency-safe display.**
+  - Every amount is formatted with its symbol *and* ISO code (e.g. `₹2,759,634.33 INR`),
+    because symbols such as `$` are shared by several currencies.
+  - Nothing is summed, averaged or sorted across currencies. The dashboard shows one card
+    per currency; the only cross-currency figure is a head count.
+- **Business dates** (`asOfDate`, hire and effective dates) are formatted directly from
+  the `YYYY-MM-DD` string, never through a `Date`. The viewer's time zone therefore
+  cannot shift the day. The dashboard and analytics page say "as of 19 Sep 2026 (UTC)".
+- **Filter dropdowns** for country and department are built from the existing
+  `/api/analytics/by-country` and `/by-department` responses, because the backend has no
+  filter-options endpoint and Step 6 made no backend changes. A country or department
+  whose employees are all terminated, or have no current salary, would be missing from
+  the dropdown (the seed has none). A dedicated endpoint would remove that limit.
+- **Errors.**
+  - A `401` from any API call clears the session, shows "Your session has expired" once
+    (even when several requests fail together) and returns to `/login`.
+  - Other errors appear in the page (for loading) or in the dialog (for saving), using
+    `describeHttpError`. Server internals are never shown.
+- **Bundles.** The shell and every page are lazy-loaded; the initial bundle is about
+  496 kB raw, 125 kB transferred.
 
 ## Salary history model
 
@@ -368,8 +422,9 @@ and count all happen in MySQL. Measured plans are in [performance.md](performanc
 - **Why Specifications?** They build a WHERE clause from optional conditions using plain
   JPA, with no extra library. Four optional filters would otherwise need 16 repository
   methods or hand-built JPQL strings.
-- **Filter options** for UI dropdowns (distinct countries and departments) are planned
-  with the employee list UI.
+- **Filter options** for the UI dropdowns (distinct countries and departments) have no
+  dedicated endpoint. The frontend derives them from the analytics endpoints (see
+  [Frontend structure](#frontend-structure)).
 
 ## Testing strategy
 
@@ -505,10 +560,15 @@ Each increment is independently reviewable and committable.
 3. **Employee domain**: `employee` migration, deterministic 10k seed, read-only list API (search, filters, pagination) and employee detail. *(done)*
 4. **Salary history API**: `salary_record` migration and seeded histories; record a salary change, correct a record, list history, current salary. *(done)*
 5. **Analytics API**: per-currency aggregates overall, by country and by department. *(done)*
-6. **Angular foundation**: project setup, login page, auth interceptor and route guard.
-7. **Employee list UI**: Material table with server-side pagination, search and filters, plus the filter-options endpoint.
-8. **Employee detail and salary history UI**: history table, add-salary and correct-salary forms.
-9. **Analytics UI**.
+6. **Angular frontend** *(done)*:
+   - login, application shell, auth interceptor and route guard
+   - dashboard
+   - employee list (server-side paging, search, filters) and employee detail
+   - salary history with add and correct
+   - analytics
+
+   Filter options come from the analytics endpoints rather than a new endpoint (see
+   [Frontend structure](#frontend-structure)).
 
 ## Resolved decisions
 

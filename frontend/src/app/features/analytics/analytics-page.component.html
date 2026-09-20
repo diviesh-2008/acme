@@ -1,0 +1,60 @@
+<div class="page">
+  <header class="page-header">
+    <div>
+      <h1>Compensation analytics</h1>
+      @if (view(); as data) {
+        <p class="subtitle as-of">Compensation figures as of {{ data.asOfDate | businessDate }} (UTC)</p>
+      } @else {
+        <p class="subtitle">Current salaries across ACME</p>
+      }
+    </div>
+  </header>
+
+  @if (loading()) {
+    <mat-progress-bar mode="indeterminate" aria-label="Loading analytics" />
+  } @else if (error()) {
+    <app-state-message tone="error" icon="cloud_off" title="Could not load analytics" [message]="error()"
+                       actionLabel="Try again" (action)="load()" />
+  } @else {
+    @if (view(); as data) {
+      <p class="note">
+        <mat-icon aria-hidden="true">info</mat-icon>
+        <span>
+          Statistics use each employee's current salary and exclude terminated employees.
+          Every figure is calculated separately per currency. Amounts in different currencies are never combined or converted.
+        </span>
+      </p>
+
+      <mat-card appearance="outlined">
+        <mat-tab-group mat-stretch-tabs="false" animationDuration="0ms">
+          <mat-tab label="Overview">
+            @if (data.overview.length === 0) {
+              <app-state-message icon="info" title="No current salaries"
+                                 message="There are no salaries in effect to summarise yet." />
+            } @else {
+              <app-statistics-table [rows]="data.overview" caption="Current salary statistics per currency" />
+            }
+          </mat-tab>
+          <mat-tab label="By country">
+            @if (data.byCountry.length === 0) {
+              <app-state-message icon="public" title="No country data"
+                                 message="There are no salaries in effect to summarise yet." />
+            } @else {
+              <app-statistics-table [rows]="data.byCountry" groupLabel="Country"
+                                    caption="Current salary statistics per country and currency" />
+            }
+          </mat-tab>
+          <mat-tab label="By department">
+            @if (data.byDepartment.length === 0) {
+              <app-state-message icon="apartment" title="No department data"
+                                 message="There are no salaries in effect to summarise yet." />
+            } @else {
+              <app-statistics-table [rows]="data.byDepartment" groupLabel="Department"
+                                    caption="Current salary statistics per department and currency" />
+            }
+          </mat-tab>
+        </mat-tab-group>
+      </mat-card>
+    }
+  }
+</div>

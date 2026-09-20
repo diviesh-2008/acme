@@ -1,0 +1,160 @@
+<div class="page">
+  <header class="page-header">
+    <div>
+      <h1>Employees</h1>
+      <p class="subtitle">
+        @if (page(); as result) {
+          {{ result.totalElements | count }} {{ result.totalElements === 1 ? 'employee' : 'employees' }}
+          {{ hasFilters() ? 'match your filters' : 'in total' }}
+        } @else {
+          Search the employee directory
+        }
+      </p>
+    </div>
+  </header>
+
+  <form class="filters" [formGroup]="filters" (ngSubmit)="$event.preventDefault()" role="search"
+        aria-label="Search and filter employees">
+    <mat-form-field appearance="outline" class="search-field" subscriptSizing="dynamic">
+      <mat-label>Search</mat-label>
+      <mat-icon matPrefix aria-hidden="true">search</mat-icon>
+      <input matInput formControlName="search" placeholder="Name, email or employee code" autocomplete="off" />
+      @if (filters.controls.search.value) {
+        <button mat-icon-button matSuffix type="button" aria-label="Clear search"
+                (click)="filters.controls.search.setValue('')">
+          <mat-icon>close</mat-icon>
+        </button>
+      }
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" subscriptSizing="dynamic">
+      <mat-label>Country</mat-label>
+      <mat-select formControlName="country">
+        <mat-option value="">All countries</mat-option>
+        @for (country of countries(); track country) {
+          <mat-option [value]="country">{{ country | countryName }} ({{ country }})</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" subscriptSizing="dynamic">
+      <mat-label>Department</mat-label>
+      <mat-select formControlName="department">
+        <mat-option value="">All departments</mat-option>
+        @for (department of departments(); track department) {
+          <mat-option [value]="department">{{ department }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" subscriptSizing="dynamic">
+      <mat-label>Status</mat-label>
+      <mat-select formControlName="status">
+        <mat-option value="">All statuses</mat-option>
+        @for (status of statuses; track status) {
+          <mat-option [value]="status">{{ status | employmentStatus }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <button mat-button type="button" class="clear" [disabled]="!hasFilters()" (click)="clearFilters()">
+      <mat-icon>filter_alt_off</mat-icon>
+      Clear filters
+    </button>
+  </form>
+
+  <div class="table-card">
+    <div class="progress-slot">
+      @if (loading()) {
+        <mat-progress-bar mode="indeterminate" aria-label="Loading employees" />
+      }
+    </div>
+
+    @if (error()) {
+      <app-state-message tone="error" icon="cloud_off" title="Could not load employees" [message]="error()"
+                         actionLabel="Try again" (action)="retry()" />
+    } @else {
+      @if (page(); as result) {
+        @if (result.content.length === 0) {
+          <app-state-message icon="person_search" title="No employees found"
+                             [message]="hasFilters() ? 'Try a different search or clear the filters.' : null"
+                             [actionLabel]="hasFilters() ? 'Clear filters' : null" (action)="clearFilters()" />
+        } @else {
+          <div class="table-scroll">
+            <table mat-table [dataSource]="result.content" class="employee-table">
+              <caption class="visually-hidden">Employees, ordered by last name then first name</caption>
+
+              <ng-container matColumnDef="employeeCode">
+                <th mat-header-cell *matHeaderCellDef scope="col">Code</th>
+                <td mat-cell *matCellDef="let employee" class="nowrap">
+                  <a [routerLink]="['/employees', employee.id]">{{ employee.employeeCode }}</a>
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="name">
+                <th mat-header-cell *matHeaderCellDef scope="col">Name</th>
+                <td mat-cell *matCellDef="let employee">
+                  <a [routerLink]="['/employees', employee.id]">{{ employee.lastName }}, {{ employee.firstName }}</a>
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="email">
+                <th mat-header-cell *matHeaderCellDef scope="col">Email</th>
+                <td mat-cell *matCellDef="let employee">{{ employee.email }}</td>
+              </ng-container>
+
+              <ng-container matColumnDef="jobTitle">
+                <th mat-header-cell *matHeaderCellDef scope="col">Job title</th>
+                <td mat-cell *matCellDef="let employee">{{ employee.jobTitle }}</td>
+              </ng-container>
+
+              <ng-container matColumnDef="department">
+                <th mat-header-cell *matHeaderCellDef scope="col">Department</th>
+                <td mat-cell *matCellDef="let employee">{{ employee.department }}</td>
+              </ng-container>
+
+              <ng-container matColumnDef="country">
+                <th mat-header-cell *matHeaderCellDef scope="col">Country</th>
+                <td mat-cell *matCellDef="let employee">
+                  <span [matTooltip]="employee.countryCode | countryName">{{ employee.countryCode }}</span>
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="status">
+                <th mat-header-cell *matHeaderCellDef scope="col">Status</th>
+                <td mat-cell *matCellDef="let employee">
+                  <span class="status" [class]="'status status-' + employee.employmentStatus.toLowerCase()">
+                    {{ employee.employmentStatus | employmentStatus }}
+                  </span>
+                </td>
+              </ng-container>
+
+              <ng-container matColumnDef="hireDate">
+                <th mat-header-cell *matHeaderCellDef scope="col">Hire date</th>
+                <td mat-cell *matCellDef="let employee" class="nowrap">{{ employee.hireDate | businessDate }}</td>
+              </ng-container>
+
+              <ng-container matColumnDef="actions">
+                <th mat-header-cell *matHeaderCellDef scope="col"><span class="visually-hidden">Actions</span></th>
+                <td mat-cell *matCellDef="let employee" class="actions">
+                  <a mat-icon-button [routerLink]="['/employees', employee.id, 'salary']"
+                     [attr.aria-label]="'Salary of ' + employee.firstName + ' ' + employee.lastName"
+                     matTooltip="View salary">
+                    <mat-icon>payments</mat-icon>
+                  </a>
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="columns; sticky: true"></tr>
+              <tr mat-row *matRowDef="let row; columns: columns"></tr>
+            </table>
+          </div>
+        }
+
+        <mat-paginator [length]="result.totalElements" [pageIndex]="criteria.page" [pageSize]="criteria.size"
+                       [pageSizeOptions]="pageSizeOptions" [disabled]="loading()" showFirstLastButtons
+                       (page)="onPage($event)" aria-label="Select page of employees" />
+      }
+    }
+  </div>
+</div>
