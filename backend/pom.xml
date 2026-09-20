@@ -85,6 +85,8 @@
 	</dependencies>
 
 	<build>
+		<!-- Stable artifact name, so run and container commands do not embed the version. -->
+		<finalName>salary-management</finalName>
 		<plugins>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>

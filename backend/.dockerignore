@@ -1,0 +1,7 @@
+# Keep local build output and tooling out of the image build context.
+target/
+.mvn/
+mvnw
+mvnw.cmd
+.env
+*.log

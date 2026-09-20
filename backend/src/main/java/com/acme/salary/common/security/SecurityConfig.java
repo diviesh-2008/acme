@@ -1,6 +1,8 @@
 package com.acme.salary.common.security;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -28,6 +30,9 @@ import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 /**
  * HTTP security: stateless JWT bearer authentication for every API except login.
@@ -36,7 +41,7 @@ import org.springframework.security.web.SecurityFilterChain;
  * expiry and issuer), so the application has no hand-written JWT filter.
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(JwtProperties.class)
+@EnableConfigurationProperties({ JwtProperties.class, CorsProperties.class })
 public class SecurityConfig {
 
 	/** JWT claim holding the user's role, e.g. {@code "HR_MANAGER"}. */
@@ -45,12 +50,17 @@ public class SecurityConfig {
 	// HS256 needs a key of at least 256 bits.
 	private static final int MIN_SECRET_BYTES = 32;
 
+	// How long a browser may cache a preflight response.
+	private static final Duration PREFLIGHT_MAX_AGE = Duration.ofHours(1);
+
 	@Bean
-	SecurityFilterChain securityFilterChain(HttpSecurity http, SecurityProblemHandler problemHandler)
-			throws Exception {
+	SecurityFilterChain securityFilterChain(HttpSecurity http, SecurityProblemHandler problemHandler,
+			CorsConfigurationSource corsConfigurationSource) throws Exception {
 		http
 			// Auth uses the Authorization header, not cookies, so CSRF does not apply.
 			.csrf(AbstractHttpConfigurer::disable)
+			// Runs before authorization, so browser preflights are answered without a token.
+			.cors(cors -> cors.configurationSource(corsConfigurationSource))
 			.sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 			.authorizeHttpRequests(auth -> auth
 				.requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
@@ -64,6 +74,27 @@ public class SecurityConfig {
 				.authenticationEntryPoint(problemHandler)
 				.accessDeniedHandler(problemHandler));
 		return http.build();
+	}
+
+	/**
+	 * Allows the configured origins to call {@code /api/**}. With no configured origin the
+	 * source matches nothing, so no {@code Access-Control-Allow-Origin} header is ever sent.
+	 * Origins are always listed explicitly: never {@code *}. Credentials stay off because
+	 * the browser sends the token in the Authorization header, not in a cookie.
+	 */
+	@Bean
+	CorsConfigurationSource corsConfigurationSource(CorsProperties properties) {
+		if (properties.allowedOrigins().isEmpty()) {
+			return request -> null;
+		}
+		CorsConfiguration configuration = new CorsConfiguration();
+		configuration.setAllowedOrigins(properties.allowedOrigins());
+		configuration.setAllowedMethods(List.of("GET", "POST", "PUT"));
+		configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+		configuration.setMaxAge(PREFLIGHT_MAX_AGE);
+		UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+		source.registerCorsConfiguration("/api/**", configuration);
+		return source;
 	}
 
 	@Bean

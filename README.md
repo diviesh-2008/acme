@@ -57,6 +57,14 @@ the repository root, you can load it into PowerShell with:
 Get-Content .env | Where-Object { $_ -match '^[A-Z_]+=' } | ForEach-Object { $name, $value = $_ -split '=', 2; Set-Item "env:$name" $value }
 ```
 
+To run it the way a server does, build the executable jar and start it. The name has no
+version in it, so the command never changes:
+
+```bash
+./mvnw clean package          # builds backend/target/salary-management.jar
+java -jar target/salary-management.jar
+```
+
 Flyway applies migrations automatically on startup. Once the account exists, it is
 never modified, and changing `ACME_INITIAL_HR_PASSWORD` later does not reset it.
 
@@ -226,9 +234,9 @@ npm start          # ng serve on http://localhost:4200
 
 The development server **proxies `/api` to `http://localhost:8080`** (`proxy.conf.json`).
 The browser therefore only talks to one origin, and the backend needs no CORS
-configuration. The API base path `/api` is configured in one place,
-`src/environments/environment.ts`. To use a backend on another port, change the `target`
-in `proxy.conf.json`.
+configuration. The API base path `/api` comes from `src/environments/environment.ts`, the
+one place it is configured. To use a backend on another port, change the `target` in
+`proxy.conf.json`.
 
 Sign in with the `ACME_INITIAL_HR_EMAIL` / `ACME_INITIAL_HR_PASSWORD` account.
 
@@ -276,8 +284,198 @@ npm run lint       # Angular ESLint, including template accessibility rules
 npm run build      # production build into frontend/dist/frontend/browser
 ```
 
-The production build is a static site. Serve `dist/frontend/browser` from the same origin
-as the API (or behind the same reverse proxy), routing unknown paths to `index.html`.
+The production build is a static site: serve `dist/frontend/browser`, routing unknown
+paths to `index.html`. By default it calls `/api` on its own origin. Set
+`ACME_API_BASE_URL` before building to point it at an API on another origin — see
+[Production deployment](#production-deployment).
+
+## Production deployment
+
+The target deployment is GitHub → [Render](https://render.com) for both services and
+[Aiven](https://aiven.io) for MySQL, all on free plans. Nothing below is automated: there
+is no `render.yaml`, no cloud credentials in the repository and no deployment script. The
+code is ready; the steps are manual and done in each provider's dashboard.
+
+### How the pieces fit together
+
+```
+Browser ──HTTPS──> Render Static Site (Angular, dist/frontend/browser)
+   │
+   └────HTTPS + Bearer token──> Render Web Service (Spring Boot in Docker)
+                                         │
+                                         └──TLS──> Aiven MySQL
+```
+
+The two services are on **different origins**. A Render static site can rewrite paths
+only within itself; it cannot proxy `/api` to another host. So, unlike local development,
+the browser calls the API cross-origin, which is why the frontend needs the API's absolute
+URL at build time and the backend needs a CORS origin. Both are environment variables, so
+no deployment URL is committed.
+
+### Local versus production
+
+| | Local development | Production |
+|---|---|---|
+| API address | `/api`, proxied by `ng serve` | absolute URL, baked in at build time |
+| CORS | none needed (same origin) | the static site's origin, named explicitly |
+| Port | 8080 | whatever Render sets in `PORT` |
+| Database | local MySQL, plain connection | Aiven MySQL over TLS |
+| Demo data | `dev` profile seeds 10,000 employees | never seeded |
+| Schema | Flyway on startup | Flyway on startup (same migrations) |
+
+### 1. Database: Aiven MySQL
+
+Create a **MySQL** service on the free plan and pick **version 8.0 or later**. The
+migrations use MySQL 8 features (window functions, `CHECK` constraints with
+`REGEXP_LIKE`, the `utf8mb4_0900_ai_ci` collation), so 8.0 is the floor; the integration
+tests run on 8.4.
+
+From the service overview, build the JDBC URL from the host, port and database name:
+
+```
+jdbc:mysql://<host>:<port>/<database>?sslMode=REQUIRED
+```
+
+Two things to watch:
+
+- **Use `sslMode=REQUIRED`, not `sslmode=require`.** Aiven's own Java page shows the
+  lowercase spelling, which the MySQL Connector/J driver does not recognise: it silently
+  ignores the unknown parameter and falls back to `PREFERRED`, which downgrades to an
+  unencrypted connection if the server allows one. The correct spelling was verified
+  against the driver. `VERIFY_CA` is stronger still, but needs Aiven's CA certificate
+  installed in a truststore, so it is not the default here.
+- The free plan has 1 GB of storage and **powers off after a period of inactivity**; the
+  first request after that is slow while it starts again.
+
+Set the collation for the database to `utf8mb4_0900_ai_ci` if it is configurable, so
+search stays case- and accent-insensitive as it is locally.
+
+### 2. Backend: Render Web Service
+
+Render has no native Java runtime, so the backend ships as a container. `backend/Dockerfile`
+is a two-stage build (Maven + JDK 21 to build, JRE 21 to run) and needs no build or start
+command of its own.
+
+| Setting | Value |
+|---|---|
+| Type | Web Service |
+| Runtime | Docker |
+| Root directory | `backend` |
+| Dockerfile path | `backend/Dockerfile` |
+| Health check path | leave empty (see below) |
+
+Environment variables to set in Render (values are examples; use your own):
+
+| Variable | Value |
+|---|---|
+| `ACME_DB_URL` | `jdbc:mysql://<aiven-host>:<port>/<database>?sslMode=REQUIRED` |
+| `ACME_DB_USERNAME` | the Aiven user (`avnadmin` by default) |
+| `ACME_DB_PASSWORD` | the Aiven password |
+| `ACME_JWT_SECRET` | a fresh random value, at least 32 bytes (`openssl rand -base64 48`) |
+| `ACME_INITIAL_HR_EMAIL` | the first HR Manager's email |
+| `ACME_INITIAL_HR_PASSWORD` | a strong password, 12 characters to 72 bytes |
+| `ACME_ALLOWED_ORIGINS` | the static site's origin, added after step 3 |
+
+Do not set `SPRING_PROFILES_ACTIVE`. Do not set `PORT`: Render provides it, and
+`application.yml` reads it as `${PORT:8080}`, so local runs stay on 8080.
+
+Deploy the backend before the frontend, because the frontend build needs its URL.
+
+**On first start** Flyway creates the schema by applying `V1`–`V3` to the empty Aiven
+database and records them in `flyway_schema_history`; later deploys find nothing to apply.
+Hibernate runs with `ddl-auto: validate` and only checks that the entities match. The
+initial HR Manager account is created before the server accepts requests, with a BCrypt
+hash, and only if that email does not already exist.
+
+**No demo data is ever created in production.** Seeding is guarded by
+`acme.seed.enabled`, which is `false` in `application.yml` and set to `true` only by the
+`dev` profile and the integration tests. `ProductionConfigurationTest` fails the build if
+that changes.
+
+**Health check.** The path is deliberately left empty, so Render uses its default TCP
+check on the port. The application exposes no unauthenticated endpoint that returns 2xx —
+every route except `POST /api/auth/login` requires a token, by design — so an HTTP check
+would need something new. The options, none of which are currently worth it:
+
+- *Leave it empty (chosen).* No new code, no new public surface. The limitation is that
+  it only proves the port is open, not that the database is reachable.
+- *Add Spring Boot Actuator* and expose `/actuator/health`, permitted without a token.
+  This would also report the database connection, which is a real benefit while Aiven's
+  free plan powers itself off. The cost is a new dependency, a new public endpoint to
+  keep locked down (`health` only, never `env` or `beans`) and a hole in a filter chain
+  whose current rule is simple: everything needs a token except login. Worth revisiting
+  if database outages turn out to matter in practice.
+- *Add a hand-written public `/api/health`.* Same public surface for less information than
+  Actuator gives.
+
+### 3. Frontend: Render Static Site
+
+| Setting | Value |
+|---|---|
+| Type | Static Site |
+| Root directory | `frontend` |
+| Build command | `npm ci && npm run build` |
+| Publish directory | `dist/frontend/browser` |
+
+Set one environment variable at build time:
+
+| Variable | Value |
+|---|---|
+| `ACME_API_BASE_URL` | `https://<backend-service>.onrender.com/api` |
+
+`npm run build` runs `scripts/set-api-base-url.mjs` first, which writes that value into
+`src/environments/environment.generated.ts`; `angular.json` swaps that file in for
+`environment.ts` in the production configuration. The generated file is git-ignored, so a
+deployment URL never reaches a tracked file — which also means the production build must
+be started with `npm run build` rather than a bare `ng build`. With the variable unset the
+value stays `/api`, so a local `npm run build` is unchanged. The script accepts only
+`https://` URLs, `http://localhost` and origin-relative paths, and strips a trailing slash.
+
+**SPA rewrite (required).** The app uses Angular's path-based routing, so a reload of
+`/employees/42` asks Render for a file that does not exist and would return 404. Add one
+redirect/rewrite rule to the static site:
+
+| Source | Destination | Action |
+|---|---|---|
+| `/*` | `/index.html` | Rewrite |
+
+*Rewrite*, not *Redirect*: the URL must stay as it is so the router can read it.
+
+### 4. Connect the two, then verify
+
+Once the static site has a URL, set `ACME_ALLOWED_ORIGINS` on the backend to its origin —
+scheme and host, no path, no trailing slash, for example
+`https://acme-salary.onrender.com` — and redeploy the backend. Several origins can be
+given as a comma-separated list. Until an origin is set, the API sends no CORS headers at
+all and a browser on another origin cannot read its responses; the wildcard `*` is never
+used, and credentials are not enabled because the token travels in the `Authorization`
+header rather than in a cookie.
+
+Both Render services get HTTPS certificates automatically, and Render redirects HTTP to
+HTTPS, so the whole path (browser → static site → API → database) is encrypted. Keep the
+API URL `https://`: a page served over HTTPS may not call a plain HTTP API.
+
+Then check, in order:
+
+1. The backend's logs show the Flyway migrations, then "Created initial HR Manager
+   account", then Tomcat starting.
+2. `curl -i -X POST https://<backend>/api/auth/login -H 'Content-Type: application/json' -d '{"email":"...","password":"..."}'`
+   returns 200 and a token.
+3. `curl -i https://<backend>/api/employees` without a token returns 401 as a problem
+   document — no stack trace.
+4. The static site loads, signing in works, and the browser's network tab shows calls to
+   the backend's URL with an `access-control-allow-origin` header on the responses.
+5. Reload the page on `/employees` directly: it must render, not 404 (this checks the
+   rewrite rule).
+6. The dashboard shows "No salary data yet" rather than demo figures, confirming an empty
+   production database.
+
+### What is deliberately not in the repository
+
+No `render.yaml`, no `docker-compose.yml`, no CI workflow, no Aiven CA certificate and no
+`.env` file. Every secret and every deployment URL lives in the hosting platform's
+settings, so the repository can be public without leaking anything, and nothing here has
+to change when a URL does.
 
 ## Configuration
 
@@ -289,7 +487,16 @@ as the API (or behind the same reverse proxy), routing unknown paths to `index.h
 | `ACME_JWT_SECRET`          | *none; required*                          | JWT signing secret, at least 32 bytes                |
 | `ACME_INITIAL_HR_EMAIL`    | *none*                                    | Initial HR Manager email (created if absent)         |
 | `ACME_INITIAL_HR_PASSWORD` | *none*                                    | Initial HR Manager password, 12 characters to 72 bytes |
+| `ACME_ALLOWED_ORIGINS`     | *none*                                    | Origins allowed to call the API cross-origin, comma-separated; empty disables CORS |
+| `PORT`                     | `8080`                                    | HTTP port; set by the hosting platform                |
 | `SPRING_PROFILES_ACTIVE`   | *none*                                    | `dev` loads the demo employees and salary histories |
 
-Only the database URL has a default, which points at a local MySQL. No credentials or
-secrets have defaults.
+Only the database URL and the port have defaults, and both point at a local setup. No
+credentials or secrets have defaults: an empty `ACME_JWT_SECRET` fails startup rather than
+falling back to a built-in value.
+
+The frontend has one build-time variable, read by `npm run build`:
+
+| Variable            | Default | Purpose                                                        |
+|---------------------|---------|----------------------------------------------------------------|
+| `ACME_API_BASE_URL` | `/api`  | Absolute base URL of the API when it is on a different origin  |

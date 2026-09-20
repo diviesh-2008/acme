@@ -33,11 +33,19 @@ spring:
       fail-on-unknown-properties: true
 
 server:
+  # Local default; hosting platforms (e.g. Render) inject the port they route to.
+  port: ${PORT:8080}
   error:
     include-stacktrace: never
 
 acme:
   security:
+    cors:
+      # Browser origins allowed to call the API cross-origin, comma-separated.
+      # Empty (the default) means no CORS headers at all, which is what local
+      # development needs: `ng serve` proxies /api, so requests are same-origin.
+      allowed-origins: ${ACME_ALLOWED_ORIGINS:}
+
     jwt:
       # Required, no default. At least 32 bytes, e.g. generated with `openssl rand -base64 48`.
       secret: ${ACME_JWT_SECRET:}

@@ -40,3 +40,6 @@ testem.log
 # System files
 .DS_Store
 Thumbs.db
+
+# Generated at build time from ACME_API_BASE_URL; never tracked (see scripts/set-api-base-url.mjs)
+/src/environments/environment.generated.ts

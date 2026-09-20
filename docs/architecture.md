@@ -463,13 +463,15 @@ and count all happen in MySQL. Measured plans are in [performance.md](performanc
   Docker in WSL2). Without one they fail with "Could not find a valid Docker
   environment". They fail rather than skip silently, so a green build always means the
   integration tests actually ran.
-- **Test counts (after Step 5).** The two suites are separate, so their counts don't
-  add up to one another:
+- **Test counts.** The two suites are separate, so their counts don't add up to one
+  another:
 
   | Suite | Command | Tests | Made up of |
   |-------|---------|------:|------------|
-  | Unit and web-slice (`*Test`) | `.\mvnw.cmd test` (no Docker) | 173 | 152 existing + 21 new analytics tests |
-  | Integration (`*IT`) | `.\mvnw.cmd verify` (Docker) | 53 | 38 existing + 15 new analytics tests |
+  | Unit and web-slice (`*Test`) | `.\mvnw.cmd test` (no Docker) | 182 | 173 through Step 5, plus 4 CORS and 5 production-configuration tests |
+  | Integration (`*IT`) | `.\mvnw.cmd verify` (Docker) | 53 | 38 through Step 4 + 15 analytics tests |
+
+  The frontend has its own 82 tests (`npm test`, Karma and Jasmine in headless Chrome).
 
   Docker is not available on the development machine. So the 53 integration tests were
   verified against a throwaway MySQL 8.0 instance, using a scratch copy of the backend in
@@ -547,9 +549,43 @@ salaries automatically.
 | `ACME_DB_USERNAME` / `ACME_DB_PASSWORD` | *none* | Database credentials |
 | `ACME_JWT_SECRET` | *none; required* | HS256 signing key (≥ 32 bytes) |
 | `ACME_INITIAL_HR_EMAIL` / `ACME_INITIAL_HR_PASSWORD` | *none* | Creates the initial HR Manager account if absent (password 12 characters to 72 bytes) |
+| `ACME_ALLOWED_ORIGINS` | *none* | Origins allowed to call the API cross-origin; empty means no CORS headers |
+| `PORT` | `8080` | HTTP port, set by the hosting platform |
 | `SPRING_PROFILES_ACTIVE` | *none* | `dev` enables the demo seed (employees and salary histories) |
 
 Nothing that is secret in a shared environment is committed.
+
+## Deployment shape
+
+The application is two deployable units and a database, and it is built so that moving
+from a laptop to a host changes only environment variables.
+
+```
+Static site (Angular build)  ──HTTPS + Bearer token──>  Web service (Spring Boot)  ──TLS──>  MySQL
+```
+
+The step-by-step provider setup is in the README under *Production deployment*. The
+design decisions behind it:
+
+- **The API location is a build-time value, not a runtime one.** `environment.ts` holds
+  `/api` for same-origin setups; a production build replaces it with
+  a git-ignored `environment.generated.ts`, written from `ACME_API_BASE_URL` at the start
+  of the build so that no tracked file ever holds a deployment URL. A runtime config file
+  fetched at startup would also work, but it adds a request before the app can start and
+  a file to keep in sync, for a value that changes only when the backend moves.
+- **Cross-origin access is off until an origin is named.** Hosting the static site and the
+  API on one origin is not always possible — a static host that cannot proxy forces two
+  origins — so the backend supports CORS, but only for origins listed in
+  `ACME_ALLOWED_ORIGINS`. There is no wildcard and no credential support: the token is
+  sent in the `Authorization` header, never in a cookie, so the browser never attaches
+  ambient authority to a cross-origin request.
+- **The container is part of the repository, the platform configuration is not.** A
+  `Dockerfile` describes how to build and run the application anywhere; a `render.yaml`
+  would tie the repository to one provider and tempt secrets into version control.
+- **Production safety is asserted in a test, not just in prose.** The demo seed being off,
+  Flyway owning the schema, the port being overridable and every secret being empty by
+  default are all checked by `ProductionConfigurationTest`, because these are mistakes
+  that only show up in production.
 
 ## Delivery increments
 
@@ -569,6 +605,10 @@ Each increment is independently reviewable and committable.
 
    Filter options come from the analytics endpoints rather than a new endpoint (see
    [Frontend structure](#frontend-structure)).
+7. **Deployment preparation** *(done; nothing deployed yet)*: container image for the
+   backend, platform-provided port, environment-driven CORS, build-time API URL for the
+   frontend, and the provider setup written down in the README. See
+   [Deployment shape](#deployment-shape).
 
 ## Resolved decisions
 
